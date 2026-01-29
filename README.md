@@ -13,6 +13,8 @@ It requires **no ROM patching**, uses only **standard KERNAL routines**, and sup
 
 This project is both a learning exercise and a functional retro shell environment that bridges memory-only workflows with real disk operations.
 
+Downloads: Versioned binaries are available on the Releases page.
+
 ---
 
 ## Features
