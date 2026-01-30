@@ -90,7 +90,7 @@ C64UX v0.5 introduces the first **direct bridge between the RAM filesystem and d
 `SAVE <filename>`
 
 - Writes a RAM file to disk on **device 8**
-- Files are saved as **SEQ** files using streamed KERNAL I/O
+- Files are saved as **PRG** files using streamed KERNAL I/O
 - Gracefully handles missing drives, channel errors, and disk failures
 
 ### LOAD
