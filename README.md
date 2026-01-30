@@ -1,19 +1,19 @@
 # c64ux
-Unix-inspired shell with RAM filesystem and Commodore DOS integration  
+Unix-inspired shell with RAM filesystem, built-in editor, and Commodore DOS integration  
 for the Commodore 64 (6502 assembly)
 
 **C64UX** is a small Unix-inspired shell written entirely in **6502 assembly** for the **Commodore 64**.  
-It combines a RAM-resident filesystem with real Commodore DOS interaction, creating a minimalist but powerful retro system environment.
+It combines a RAM-resident filesystem, a nano-style text editor, and real Commodore DOS interaction to create a minimalist but surprisingly capable retro system environment.
 
-**Current version:** v0.3  
+**Current version:** v0.4  
 **Author:** Anthony Scarola
 
 C64UX provides a command-driven interface reminiscent of early Unix systems, running on real C64 hardware (or emulators).  
 It requires **no ROM patching**, uses only **standard KERNAL routines**, and supports **true disk access via Commodore DOS** when a drive is present.
 
-This project is both a learning exercise and a functional retro shell environment that bridges memory-only workflows with real disk operations.
+This project is both a learning exercise and a functional retro shell that bridges memory-only workflows with interactive editing and real disk operations.
 
-Downloads: Versioned binaries are available on the Releases page.
+**Downloads:** Versioned binaries and source snapshots are available on the **Releases** page.
 
 ---
 
@@ -21,13 +21,14 @@ Downloads: Versioned binaries are available on the Releases page.
 
 - Interactive Unix-style shell
 - RAM-resident filesystem
+- Built-in nano-style text editor
 - File metadata (name, size, address, date, time)
 - Session username, date, and time
 - Auto-advancing clock based on the KERNAL jiffy timer
 - Accurate uptime tracking across midnight rollovers
 - Unix-like prompt with username
 - Integrated Commodore DOS command interface
-- Clean separation of subsystems (console, filesystem, time, commands, DOS)
+- Clean separation of subsystems (console, filesystem, editor, time, commands, DOS)
 
 ---
 
@@ -40,6 +41,7 @@ Downloads: Versioned binaries are available on the Releases page.
 | `STAT`    | Show detailed file metadata |
 | `CAT`     | Display file contents |
 | `WRITE`   | Create a new RAM-resident text file |
+| `NANO`    | Edit or create a RAM file (multi-line editor) |
 | `RM`      | Delete a RAM file |
 | `MEM`     | Show free BASIC memory |
 | `DATE`    | Show current session date |
@@ -55,25 +57,41 @@ Downloads: Versioned binaries are available on the Releases page.
 
 ---
 
-## Commodore DOS Integration (v0.3)
+## Nano-Style Editor (v0.4)
 
-C64UX v0.3 adds **direct Commodore DOS access** using standard KERNAL disk routines.
+C64UX v0.4 introduces a built-in **nano-style text editor** for RAM files.
+
+### NANO Command
+`NANO`
+- Opens an existing RAM file for editing, or creates it if it does not exist
+- Displays existing file contents before editing
+- Accepts multi-line text input
+- Editing ends when the user enters a single `.` on its own line
+- Lines are stored using CR (`$0D`) separators
+- Changes are saved back into the RAM filesystem
+
+This allows real interactive editing instead of write-once file creation.
+
+---
+
+## Commodore DOS Integration (v0.3+)
+
+C64UX includes **direct Commodore DOS access** using standard KERNAL disk routines.
 
 ### DOS Command
 Send raw DOS commands to device 8:
-- DOS I0
-- DOS S:FILE
-- DOS R:NEW=OLD
+`DOS I0`
+`DOS S:FILE`
+`DOS R:NEW=OLD`
 
 ### Directory Shortcut
-- DOS @$
-
-Displays a standard Commodore directory listing (blocks and filenames), equivalent to loading `$` in BASIC.
+`DOS @$`
+Displays a standard Commodore directory listing (blocks, filenames, types, and free blocks), equivalent to loading `$` in BASIC.
 
 ### Status Reporting
 After each DOS command, C64UX automatically reads and prints the drive status line:
-- STATUS: 00, OK,00,00
-(example; actual status depends on command and drive state)
+`STATUS: 00, OK,00,00`
+(actual status depends on command and drive state)
 
 This implementation:
 - Uses `SETNAM`, `SETLFS`, `OPEN`, `CHKIN`, `CHRIN`, `READST`, `CLRCHN`
@@ -112,7 +130,7 @@ All RAM filesystem data is intentionally **volatile** and lost on reset or power
 ## Prompt & Identity
 
 The shell prompt follows a Unix-inspired format:
-- username@C64UX:%
+`username@C64UX:%`
 
 System identity and version information are centralized and reused across:
 - Startup banner
@@ -128,12 +146,3 @@ Assemble using **ACME**:
 ```sh
 acme -f cbm -o c64ux.prg c64ux.asm
 ```
-
----
-
-## Emulator Notes
-
-For full disk functionality:
-	•	Enable True Drive Emulation in VICE
-	•	Attach a .d64 image to device 8
-	•	Virtual drive traps should be disabled
