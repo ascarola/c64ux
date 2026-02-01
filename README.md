@@ -1,17 +1,17 @@
 # c64ux
-Unix-inspired shell with RAM filesystem, built-in editor, and disk bridging  
+Unix-inspired shell with RAM filesystem, built-in editor, disk bridging, and REU persistence  
 for the Commodore 64 (6502 assembly)
 
 **C64UX** is a Unix-inspired shell written entirely in **6502 assembly** for the **Commodore 64**.  
-It combines a RAM-resident filesystem, a nano-style text editor, and real Commodore DOS interaction to create a minimalist yet surprisingly capable retro system environment.
+It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, and optional RAM Expansion Unit (REU) support to create a minimalist yet surprisingly capable retro system environment.
 
-**Current version:** v0.5  
+**Current version:** v0.6  
 **Author:** Anthony Scarola
 
 C64UX provides a command-driven interface reminiscent of early Unix systems, running on real C64 hardware (including modern implementations) or emulators.  
 It requires **no ROM patching**, relies exclusively on **standard KERNAL routines**, and supports **true disk access on device 8** when a drive is present.
 
-This project is both a learning exercise and a functional retro shell that bridges **in-memory workflows**, **interactive editing**, and **real disk storage**.
+This project is both a learning exercise and a functional retro shell that bridges **in-memory workflows**, **interactive editing**, **disk storage**, and now **REU-backed persistence**.
 
 **Downloads:** Versioned binaries and source snapshots are available on the **Releases** page.
 
@@ -29,9 +29,10 @@ This project is both a learning exercise and a functional retro shell that bridg
 - Unix-like prompt with username
 - Integrated Commodore DOS command interface
 - RAM ↔ disk file bridging (SAVE / LOAD)
-- Unix-style file operations (CP, MV)
+- Optional RAM ↔ REU filesystem persistence (v0.6)
+- Unix-style file operations (CP, MV, RM with wildcards)
 - Paged HELP display for full on-screen documentation
-- Clean separation of subsystems (console, filesystem, editor, time, commands, DOS, disk I/O)
+- Clean separation of subsystems (console, filesystem, editor, time, commands, disk I/O, REU)
 
 ---
 
@@ -45,11 +46,14 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `CAT`     | Display file contents |
 | `WRITE`   | Create a new RAM-resident text file |
 | `NANO`    | Edit or create a RAM file (multi-line editor) |
-| `RM`      | Delete a RAM file |
+| `RM`      | Delete RAM files (supports prefix wildcards) |
 | `CP`      | Copy a RAM file to a new RAM file |
 | `MV`      | Rename a RAM file |
 | `SAVE`    | Save a RAM file to disk (device 8) |
 | `LOAD`    | Load a disk file into the RAM filesystem |
+| `SAVEREU` | Save the entire RAM filesystem to REU |
+| `LOADREU` | Restore the RAM filesystem from REU |
+| `WIPEREU` | Clear the REU-stored filesystem image |
 | `MEM`     | Show free BASIC memory |
 | `DATE`    | Show current session date |
 | `TIME`    | Show current session time |
@@ -82,16 +86,16 @@ This enables real interactive editing instead of write-once file creation.
 
 ---
 
-## RAM ↔ Disk Bridging (v0.5)
+## RAM ↔ Disk Bridging (v0.5+)
 
-C64UX v0.5 introduces the first **direct bridge between the RAM filesystem and disk storage**.
+C64UX supports direct bridging between the RAM filesystem and disk storage.
 
 ### SAVE
 `SAVE <filename>`
 
 - Writes a RAM file to disk on **device 8**
 - Files are saved as **PRG** files using streamed KERNAL I/O
-- Gracefully handles missing drives, channel errors, and disk failures
+- Gracefully handles missing drives and disk errors
 
 ### LOAD
 `LOAD <filename>`
@@ -101,6 +105,27 @@ C64UX v0.5 introduces the first **direct bridge between the RAM filesystem and d
 - Streams file data directly into the RAM heap
 
 These commands allow RAM-based workflows to persist beyond the current session.
+
+---
+
+## REU Filesystem Persistence (v0.6)
+
+C64UX v0.6 introduces optional **RAM Expansion Unit (REU) support**, allowing the entire RAM filesystem to be preserved across program exits or restarts without disk I/O.
+
+### REU Commands
+
+- `SAVEREU` — Saves the current RAM filesystem to the REU
+- `LOADREU` — Restores the RAM filesystem from the REU
+- `WIPEREU` — Clears the REU-stored filesystem image
+
+### How It Works
+
+- The directory table and heap are copied to REU memory using DMA
+- A small metadata header is stored to validate filesystem integrity
+- On load, the filesystem is restored exactly as it was
+- If no REU is present, commands fail gracefully with clear messages
+
+This feature is fully optional and does not affect systems without an REU.
 
 ---
 
@@ -125,12 +150,6 @@ After each DOS command, C64UX automatically reads and prints the drive status li
 
 (actual status depends on command and drive state)
 
-This implementation:
-- Uses `SETNAM`, `SETLFS`, `OPEN`, `CHKIN`, `CHRIN`, `READST`, `CLRCHN`
-- Requires **true drive emulation** (recommended in VICE)
-- Works with standard **1541-compatible `.d64` images**
-- Does **not** require JiffyDOS or DolphinDOS
-
 ---
 
 ## Filesystem Design (RAM)
@@ -145,7 +164,7 @@ This implementation:
   - Creation date (`YYYY-MM-DD`)
   - Creation time (`HH:MM:SS`)
 
-All RAM filesystem data is intentionally **volatile** and lost on reset or power-off.
+RAM filesystem data is volatile by default, but can be preserved using REU support (v0.6).
 
 ---
 
