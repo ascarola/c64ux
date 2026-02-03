@@ -3,15 +3,15 @@ Unix-inspired shell with RAM filesystem, built-in editor, disk bridging, and REU
 for the Commodore 64 (6502 assembly)
 
 **C64UX** is a Unix-inspired shell written entirely in **6502 assembly** for the **Commodore 64**.  
-It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, and optional RAM Expansion Unit (REU) support to create a minimalist yet surprisingly capable retro system environment.
+It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, disk bridging, and optional RAM Expansion Unit (REU) support to create a minimalist yet surprisingly capable retro system environment.
 
-**Current version:** v0.6  
+**Current version:** v0.6.1  
 **Author:** Anthony Scarola
 
-C64UX provides a command-driven interface reminiscent of early Unix systems, running on real C64 hardware (including modern implementations) or emulators.  
-It requires **no ROM patching**, relies exclusively on **standard KERNAL routines**, and supports **true disk access on device 8** when a drive is present.
+C64UX provides a command-driven interface reminiscent of early Unix systems, running on real C64 hardware (including modern implementations such as the Ultimate 64) or emulators.  
+It requires **no ROM patching**, relies exclusively on **standard KERNAL routines**, and supports **true disk access across multiple devices** when drives are present.
 
-This project is both a learning exercise and a functional retro shell that bridges **in-memory workflows**, **interactive editing**, **disk storage**, and now **REU-backed persistence**.
+This project is both a learning exercise and a functional retro shell that bridges **in-memory workflows**, **interactive editing**, **disk storage**, and **REU-backed persistence**.
 
 **Downloads:** Versioned binaries and source snapshots are available on the **Releases** page.
 
@@ -29,10 +29,12 @@ This project is both a learning exercise and a functional retro shell that bridg
 - Unix-like prompt with username
 - Integrated Commodore DOS command interface
 - RAM ↔ disk file bridging (SAVE / LOAD)
+- True **SEQ file support** for text files (v0.6.1)
+- Configurable default disk device (v0.6.1)
 - Optional RAM ↔ REU filesystem persistence (v0.6)
 - Unix-style file operations (CP, MV, RM with wildcards)
 - Paged HELP display for full on-screen documentation
-- Clean separation of subsystems (console, filesystem, editor, time, commands, disk I/O, REU)
+- Clean separation of subsystems (console, filesystem, editor, time, disk I/O, REU)
 
 ---
 
@@ -49,8 +51,9 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `RM`      | Delete RAM files (supports prefix wildcards) |
 | `CP`      | Copy a RAM file to a new RAM file |
 | `MV`      | Rename a RAM file |
-| `SAVE`    | Save a RAM file to disk (device 8) |
+| `SAVE`    | Save a RAM file to disk (SEQ format) |
 | `LOAD`    | Load a disk file into the RAM filesystem |
+| `DRIVE`   | Show or set the default disk device (8–11) |
 | `SAVEREU` | Save the entire RAM filesystem to REU |
 | `LOADREU` | Restore the RAM filesystem from REU |
 | `WIPEREU` | Clear the REU-stored filesystem image |
@@ -63,7 +66,7 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `VERSION` | Show version/build info (alias: `VER`) |
 | `WHOAMI`  | Show current username |
 | `CLEAR`   | Clear screen (alias: `CLS`) |
-| `DOS`     | Send Commodore DOS command to drive 8 |
+| `DOS`     | Send Commodore DOS command to the active drive |
 | `EXIT`    | Return to BASIC |
 
 ---
@@ -88,19 +91,22 @@ This enables real interactive editing instead of write-once file creation.
 
 ## RAM ↔ Disk Bridging (v0.5+)
 
-C64UX supports direct bridging between the RAM filesystem and disk storage.
+C64UX supports direct bridging between the RAM filesystem and disk storage using **SEQ files**.
 
 ### SAVE
-`SAVE <filename>`
+`SAVE <filename>`  
+`SAVE <device>:<filename>`
 
-- Writes a RAM file to disk on **device 8**
-- Files are saved as **PRG** files using streamed KERNAL I/O
-- Gracefully handles missing drives and disk errors
+- Writes a RAM file to disk as a **SEQ** file
+- Uses streamed KERNAL I/O
+- Honors the currently selected default drive
+- Optional per-command device override
 
 ### LOAD
-`LOAD <filename>`
+`LOAD <filename>`  
+`LOAD <device>:<filename>`
 
-- Loads a disk file from **device 8** into the RAM filesystem
+- Loads a SEQ file from disk into the RAM filesystem
 - Creates or updates a RAM directory entry
 - Streams file data directly into the RAM heap
 
@@ -108,9 +114,23 @@ These commands allow RAM-based workflows to persist beyond the current session.
 
 ---
 
+## Default Drive Selection (v0.6.1)
+
+C64UX v0.6.1 introduces a configurable default disk device.
+
+### DRIVE Command
+`DRIVE`  
+`DRIVE <8–11>`
+
+- Displays the current default drive
+- Sets a new default drive for SAVE, LOAD, DOS, and directory operations
+- Eliminates hard-coded reliance on device 8
+
+---
+
 ## REU Filesystem Persistence (v0.6)
 
-C64UX v0.6 introduces optional **RAM Expansion Unit (REU) support**, allowing the entire RAM filesystem to be preserved across program exits or restarts without disk I/O.
+C64UX includes optional **RAM Expansion Unit (REU) support**, allowing the entire RAM filesystem to be preserved across program exits or restarts without disk I/O.
 
 ### REU Commands
 
@@ -134,7 +154,7 @@ This feature is fully optional and does not affect systems without an REU.
 C64UX includes **direct Commodore DOS access** using standard KERNAL disk routines.
 
 ### DOS Command
-Send raw DOS commands to device 8:
+Send raw DOS commands to the active drive:
 - `DOS I0`
 - `DOS S:FILE`
 - `DOS R:NEW=OLD`
@@ -143,12 +163,6 @@ Send raw DOS commands to device 8:
 - `DOS @$`
 
 Displays a standard Commodore directory listing (blocks, filenames, types, and free blocks), equivalent to loading `$` in BASIC.
-
-### Status Reporting
-After each DOS command, C64UX automatically reads and prints the drive status line:
-- `STATUS: 00, OK,00,00`
-
-(actual status depends on command and drive state)
 
 ---
 
@@ -164,30 +178,7 @@ After each DOS command, C64UX automatically reads and prints the drive status li
   - Creation date (`YYYY-MM-DD`)
   - Creation time (`HH:MM:SS`)
 
-RAM filesystem data is volatile by default, but can be preserved using REU support (v0.6).
-
----
-
-## Time, Date & Uptime
-
-- Time is driven by the C64 KERNAL jiffy clock
-- Date is initialized during setup and auto-increments correctly
-- Leap years supported (2000–2099)
-- Uptime is calculated using a boot-time baseline and jiffy rollover detection
-- Day transitions are handled correctly across midnight
-
----
-
-## Prompt & Identity
-
-The shell prompt follows a Unix-inspired format:
-
-`username@C64UX:%`
-
-System identity and version information are centralized and reused across:
-- Startup banner
-- `UNAME`
-- `VERSION`
+RAM filesystem data is volatile by default, but can be preserved using REU support.
 
 ---
 
