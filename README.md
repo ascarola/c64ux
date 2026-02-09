@@ -1,17 +1,17 @@
 # c64ux
-Unix-inspired shell with RAM filesystem, built-in editor, disk bridging, and REU persistence  
-for the Commodore 64 (6502 assembly)
+Unix-inspired shell with RAM filesystem, built-in editor, disk bridging, REU persistence,  
+login support, and theming — for the Commodore 64 (6502 assembly)
 
 **C64UX** is a Unix-inspired shell written entirely in **6502 assembly** for the **Commodore 64**.  
-It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, disk bridging, and optional RAM Expansion Unit (REU) support to create a minimalist yet surprisingly capable retro system environment.
+It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, disk bridging, optional RAM Expansion Unit (REU) support, and now **user authentication and theming** to create a minimalist yet surprisingly capable retro system environment.
 
-**Current version:** v0.6.1  
+**Current version:** v0.7  
 **Author:** Anthony Scarola
 
 C64UX provides a command-driven interface reminiscent of early Unix systems, running on real C64 hardware (including modern implementations such as the Ultimate 64) or emulators.  
 It requires **no ROM patching**, relies exclusively on **standard KERNAL routines**, and supports **true disk access across multiple devices** when drives are present.
 
-This project is both a learning exercise and a functional retro shell that bridges **in-memory workflows**, **interactive editing**, **disk storage**, and **REU-backed persistence**.
+This project is both a learning exercise and a functional retro shell that bridges **in-memory workflows**, **interactive editing**, **disk storage**, **REU-backed persistence**, and now **system identity and personalization**.
 
 **Downloads:** Versioned binaries and source snapshots are available on the **Releases** page.
 
@@ -23,7 +23,8 @@ This project is both a learning exercise and a functional retro shell that bridg
 - RAM-resident filesystem
 - Built-in nano-style multi-line text editor
 - File metadata (name, size, address, date, time)
-- Session username, date, and time
+- User login with username and password (v0.7)
+- Persistent credentials stored on disk (v0.7)
 - Auto-advancing clock based on the KERNAL jiffy timer
 - Accurate uptime tracking across midnight rollovers
 - Unix-like prompt with username
@@ -32,9 +33,11 @@ This project is both a learning exercise and a functional retro shell that bridg
 - True **SEQ file support** for text files (v0.6.1)
 - Configurable default disk device (v0.6.1)
 - Optional RAM ↔ REU filesystem persistence (v0.6)
+- System color themes (v0.7)
 - Unix-style file operations (CP, MV, RM with wildcards)
 - Paged HELP display for full on-screen documentation
-- Clean separation of subsystems (console, filesystem, editor, time, disk I/O, REU)
+- Structured boot sequence with system-style startup messages (v0.7)
+- Clean separation of subsystems (boot, console, filesystem, editor, auth, time, disk I/O, REU)
 
 ---
 
@@ -57,6 +60,8 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `SAVEREU` | Save the entire RAM filesystem to REU |
 | `LOADREU` | Restore the RAM filesystem from REU |
 | `WIPEREU` | Clear the REU-stored filesystem image |
+| `PASSWD`  | Change the current user password |
+| `THEME`   | View or change the system color theme |
 | `MEM`     | Show free BASIC memory |
 | `DATE`    | Show current session date |
 | `TIME`    | Show current session time |
@@ -68,6 +73,50 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `CLEAR`   | Clear screen (alias: `CLS`) |
 | `DOS`     | Send Commodore DOS command to the active drive |
 | `EXIT`    | Return to BASIC |
+
+---
+
+## Boot Sequence & Login (v0.7)
+
+C64UX now features a structured, system-style boot process followed by user authentication.
+
+### Boot Sequence
+- Displays staged initialization messages:
+  - Kernel startup
+  - Memory and heap initialization
+  - Filesystem setup
+  - Device and REU detection
+- Screen is cleared after boot for a clean banner display
+
+### Login System
+- On first run, the user is prompted to create a **username and password**
+- Credentials are stored in a disk-based **SEQ configuration file**
+- On subsequent runs, credentials are automatically loaded
+- User must authenticate before entering the shell
+- Three failed login attempts return control to BASIC
+- Passwords are lightly obfuscated (not plaintext)
+
+---
+
+## Themes (v0.7)
+
+C64UX supports simple system-wide color themes.
+
+### THEME Command
+`THEME`  
+`THEME <name>`
+
+Available themes:
+- `NORMAL`
+- `DARK`
+- `GREEN`
+
+Themes control:
+- Border color
+- Background color
+- Text color
+
+Themes are reset to `NORMAL` on each program launch and applied after the banner to avoid PETSCII color conflicts.
 
 ---
 
@@ -84,8 +133,6 @@ C64UX includes a built-in **nano-style text editor** for RAM files.
 - Editing ends when the user enters a single `.` on its own line
 - Lines are stored using CR (`$0D`) separators
 - Changes are saved back into the RAM filesystem
-
-This enables real interactive editing instead of write-once file creation.
 
 ---
 
@@ -110,13 +157,9 @@ C64UX supports direct bridging between the RAM filesystem and disk storage using
 - Creates or updates a RAM directory entry
 - Streams file data directly into the RAM heap
 
-These commands allow RAM-based workflows to persist beyond the current session.
-
 ---
 
 ## Default Drive Selection (v0.6.1)
-
-C64UX v0.6.1 introduces a configurable default disk device.
 
 ### DRIVE Command
 `DRIVE`  
@@ -124,7 +167,6 @@ C64UX v0.6.1 introduces a configurable default disk device.
 
 - Displays the current default drive
 - Sets a new default drive for SAVE, LOAD, DOS, and directory operations
-- Eliminates hard-coded reliance on device 8
 
 ---
 
@@ -133,36 +175,12 @@ C64UX v0.6.1 introduces a configurable default disk device.
 C64UX includes optional **RAM Expansion Unit (REU) support**, allowing the entire RAM filesystem to be preserved across program exits or restarts without disk I/O.
 
 ### REU Commands
+- `SAVEREU`
+- `LOADREU`
+- `WIPEREU`
 
-- `SAVEREU` — Saves the current RAM filesystem to the REU
-- `LOADREU` — Restores the RAM filesystem from the REU
-- `WIPEREU` — Clears the REU-stored filesystem image
-
-### How It Works
-
-- The directory table and heap are copied to REU memory using DMA
-- A small metadata header is stored to validate filesystem integrity
-- On load, the filesystem is restored exactly as it was
-- If no REU is present, commands fail gracefully with clear messages
-
-This feature is fully optional and does not affect systems without an REU.
-
----
-
-## Commodore DOS Integration (v0.3+)
-
-C64UX includes **direct Commodore DOS access** using standard KERNAL disk routines.
-
-### DOS Command
-Send raw DOS commands to the active drive:
-- `DOS I0`
-- `DOS S:FILE`
-- `DOS R:NEW=OLD`
-
-### Directory Shortcut
-- `DOS @$`
-
-Displays a standard Commodore directory listing (blocks, filenames, types, and free blocks), equivalent to loading `$` in BASIC.
+The directory table and heap are copied via DMA and restored exactly as saved.  
+Systems without an REU continue to function normally.
 
 ---
 
@@ -178,7 +196,7 @@ Displays a standard Commodore directory listing (blocks, filenames, types, and f
   - Creation date (`YYYY-MM-DD`)
   - Creation time (`HH:MM:SS`)
 
-RAM filesystem data is volatile by default, but can be preserved using REU support.
+RAM filesystem data is volatile by default but can be preserved using REU support.
 
 ---
 
