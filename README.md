@@ -51,6 +51,7 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `CAT`     | Display file contents |
 | `WRITE`   | Create a new RAM-resident text file |
 | `NANO`    | Edit or create a RAM file (multi-line editor) |
+| `ECHO`    | Print text to the screen |
 | `RM`      | Delete RAM files (supports prefix wildcards) |
 | `CP`      | Copy a RAM file to a new RAM file |
 | `MV`      | Rename a RAM file |
@@ -81,20 +82,23 @@ This project is both a learning exercise and a functional retro shell that bridg
 C64UX now features a structured, system-style boot process followed by user authentication.
 
 ### Boot Sequence
-- Displays staged initialization messages:
-  - Kernel startup
-  - Memory and heap initialization
-  - Filesystem setup
-  - Device and REU detection
+- Displays staged `[  OK  ]` initialization messages:
+  - `STARTING C64UX KERNEL V0.7`
+  - `MEMORY CHECK: 64K RAM SYSTEM`
+  - `INITIALIZING FILESYSTEM`
+  - `HEAP ALLOCATED AT $6000`
+  - `DETECTING HARDWARE`
+  - `REU: DETECTED` or `REU: NOT FOUND`
+  - `LOADING DEVICE DRIVERS`
+  - `MOUNTING /DEV/DISK (DEVICE 8)`
 - Screen is cleared after boot for a clean banner display
 
 ### Login System
-- On first run, the user is prompted to create a **username and password**
-- Credentials are stored in a disk-based **SEQ configuration file**
-- On subsequent runs, credentials are automatically loaded
+- On first run, the user is prompted to create a **username and password**, then enter the **session date and time**
+- Credentials are stored in a disk-based **SEQ configuration file** (`CONFIG`) in plain text
+- On subsequent runs, credentials are automatically loaded and the user is prompted for the session date and time
 - User must authenticate before entering the shell
 - Three failed login attempts return control to BASIC
-- Passwords are lightly obfuscated (not plaintext)
 
 ---
 
@@ -186,17 +190,17 @@ Systems without an REU continue to function normally.
 
 ## Filesystem Design (RAM)
 
-- **Directory size:** fixed (`DIR_MAX`)
+- **Directory size:** fixed (`DIR_MAX` = 8 entries)
 - **Filename length:** 8 characters (space-padded)
-- **Storage:** contiguous heap in RAM
-- **Directory entry includes:**
-  - Name
-  - Start address
-  - Length
-  - Creation date (`YYYY-MM-DD`)
-  - Creation time (`HH:MM:SS`)
+- **Storage:** contiguous heap in RAM starting at `$6000`
+- **Directory entry** (30 bytes each) **includes:**
+  - Name (8 bytes)
+  - Start address (2 bytes)
+  - Length (2 bytes)
+  - Creation date — 10 bytes (`YYYY-MM-DD`)
+  - Creation time — 8 bytes (`HH:MM:SS`)
 
-RAM filesystem data is volatile by default but can be preserved using REU support.
+RAM filesystem data is volatile by default but can be preserved using REU support or saved to disk individually via `SAVE`.
 
 ---
 
@@ -206,3 +210,4 @@ Assemble using **ACME**:
 
 ```sh
 acme -f cbm -o c64ux.prg c64ux.asm
+```
