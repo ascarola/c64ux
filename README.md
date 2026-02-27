@@ -14,7 +14,7 @@ It requires **no ROM patching**, relies exclusively on **standard KERNAL routine
 
 This project is both a learning exercise and a functional retro shell that bridges **in-memory workflows**, **interactive editing**, **disk storage**, **REU-backed persistence**, and now **system identity and personalization**.
 
-**Downloads:** Versioned binaries and source snapshots are available on the **Releases** page.
+**Downloads:** The latest source and binary are in this repository. Older versioned releases are available on the **Releases** page.
 
 ---
 
