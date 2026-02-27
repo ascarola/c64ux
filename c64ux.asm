@@ -2,7 +2,7 @@
 ;  C64UX — Unix-inspired shell for the Commodore 64
 ;
 ;  Version:    v0.7
-;  Author:     Anthony Scarola <a@scarolas.com>
+;  Author:     A. Scarola
 ;  Date:       2026-02-02
 ;
 ;  Description:
