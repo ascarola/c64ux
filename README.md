@@ -6,7 +6,8 @@ login support, and theming — for the Commodore 64 (6502 assembly)
 It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, disk bridging, optional RAM Expansion Unit (REU) support, and now **user authentication and theming** to create a minimalist yet surprisingly capable retro system environment.
 
 **Current version:** v0.7  
-**Author:** Anthony Scarola
+**Author:** Anthony Scarola  
+**Development:** Designed and directed by Anthony Scarola; code developed with assistance from Claude Code (Anthropic)
 
 C64UX provides a command-driven interface reminiscent of early Unix systems, running on real C64 hardware (including modern implementations such as the Ultimate 64) or emulators.  
 It requires **no ROM patching**, relies exclusively on **standard KERNAL routines**, and supports **true disk access across multiple devices** when drives are present.
@@ -201,6 +202,22 @@ Systems without an REU continue to function normally.
   - Creation time — 8 bytes (`HH:MM:SS`)
 
 RAM filesystem data is volatile by default but can be preserved using REU support or saved to disk individually via `SAVE`.
+
+---
+
+## Development Notes
+
+C64UX is designed and directed by A. Scarola. The 6502 assembly code
+was developed with the assistance of Claude Code (Anthropic AI). All
+architecture decisions, feature design, subsystem structure, version
+planning, and testing were performed by the author. The project has been
+iteratively developed across 7 releases.
+
+This project is released under the MIT license. The author asserts
+copyright based on the creative and architectural contributions described
+above. The legal landscape around AI-assisted software authorship is
+evolving; if you have concerns, treat this project as you would any
+open-source release — use it, fork it, and build on it freely.
 
 ---
 
