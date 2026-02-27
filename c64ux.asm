@@ -875,7 +875,7 @@ load_config:
     and #$BF             ; mask out EOI
     bne @fail_close
 
-    ; Read PASSWORD until CR ($0D)
+    ; Read PASSWORD until CR ($0D), undo XOR obfuscation
     ldx #0
 @read_pass:
     jsr CHRIN
@@ -883,6 +883,7 @@ load_config:
     beq @pass_done
     cpx #USER_MAX-1
     bcs @read_pass       ; skip extra chars
+    eor #$A5             ; undo XOR obfuscation after reading from disk
     sta PASSWORD,x
     inx
     jmp @read_pass
@@ -972,11 +973,12 @@ save_config:
     lda #$0D
     jsr CHROUT
 
-    ; Write PASSWORD bytes until null, then CR
+    ; Write PASSWORD bytes until null, then CR (XOR-obfuscated with $A5)
     ldx #0
 @wp:
     lda PASSWORD,x
     beq @wp_done
+    eor #$A5             ; XOR obfuscation before writing to disk
     jsr CHROUT
     inx
     cpx #USER_MAX

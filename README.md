@@ -25,7 +25,7 @@ This project is both a learning exercise and a functional retro shell that bridg
 - Built-in nano-style multi-line text editor
 - File metadata (name, size, address, date, time)
 - User login with username and password (v0.7)
-- Persistent credentials stored on disk (v0.7)
+- Persistent credentials stored on disk with password obfuscation (v0.7)
 - Auto-advancing clock based on the KERNAL jiffy timer
 - Accurate uptime tracking across midnight rollovers
 - Unix-like prompt with username
@@ -96,7 +96,7 @@ C64UX now features a structured, system-style boot process followed by user auth
 
 ### Login System
 - On first run, the user is prompted to create a **username and password**, then enter the **session date and time**
-- Credentials are stored in a disk-based **SEQ configuration file** (`CONFIG`) in plain text
+- Credentials are stored in a disk-based **SEQ configuration file** (`CONFIG`); the password is XOR-obfuscated before being written to disk to prevent casual plaintext inspection
 - On subsequent runs, credentials are automatically loaded and the user is prompted for the session date and time
 - User must authenticate before entering the shell
 - Three failed login attempts return control to BASIC
