@@ -36,6 +36,7 @@ This project is both a learning exercise and a functional retro shell that bridg
 - Optional RAM ↔ REU filesystem persistence (v0.6)
 - System color themes (v0.7)
 - Unix-style file operations (CP, MV, RM with wildcards)
+- RESET command to reclaim heap space on demand
 - Paged HELP display for full on-screen documentation
 - Structured boot sequence with system-style startup messages (v0.7)
 - Clean separation of subsystems (boot, console, filesystem, editor, auth, time, disk I/O, REU)
@@ -69,6 +70,7 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `TIME`    | Show current session time |
 | `UPTIME`  | Show system uptime (DAYS HH:MM:SS) |
 | `PWD`     | Show current working path (`/HOME/<username>`) |
+| `RESET`   | Clear the RAM filesystem (with confirmation) |
 | `UNAME`   | Show system and version information |
 | `VERSION` | Show version/build info (alias: `VER`) |
 | `WHOAMI`  | Show current username |
