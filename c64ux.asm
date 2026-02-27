@@ -2512,7 +2512,7 @@ is_clear:
 
     lda LINEBUF+2,x
     cmp #'S'
-    beq @cls_tail     ; <-- CLS matched
+    beq @cls_tail
 
     ; otherwise must be CLEAR
     cmp #'E'
@@ -3663,8 +3663,6 @@ savereu_ok:
     ; FAILURE MESSAGE
     ; =========================================================
 savereu_failed:
-    ; You can re-use an existing error string if you want.
-    ; If you don't have one, define savereu_fail_txt.
     lda #<savereu_fail_txt
     sta ZPTR_LO
     lda #>savereu_fail_txt
@@ -5326,7 +5324,7 @@ cmd_date:
     lda #13
     jsr CHROUT
 
-    jsr update_day_rollover      ; <-- ADD THIS
+    jsr update_day_rollover
 
     lda #<DATE_STR
     sta ZPTR_LO
@@ -5348,10 +5346,8 @@ cmd_time:
     lda #13
     jsr CHROUT
 
-    jsr update_day_rollover      ; <-- ADD THIS
+    jsr update_day_rollover
 
-    ; You can reuse the jlo/jmid/jhi that update_day_rollover already read,
-    ; but keeping your existing calls is fine.
     jsr read_clock_to_jiffies
     jsr jiffies_to_seconds16
     jsr seconds16_to_hms
