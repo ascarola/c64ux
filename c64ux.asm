@@ -2009,8 +2009,15 @@ exec_cmd:
 @try_passwd:
     ; PASSWD?
     jsr is_passwd
-    bcc @try_theme
+    bcc @try_reset
     jsr cmd_passwd
+    rts
+
+@try_reset:
+    ; RESET?
+    jsr is_reset
+    bcc @try_theme
+    jsr cmd_reset
     rts
 
 @try_theme:
@@ -3150,6 +3157,37 @@ is_passwd:
     cmp #'D'
     bne @no
     lda LINEBUF+6,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_reset
+; Matches command: RESET
+; ------------------------------------------------------------
+is_reset:
+    lda LINEBUF,x
+    cmp #'R'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'E'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'S'
+    bne @no
+    lda LINEBUF+3,x
+    cmp #'E'
+    bne @no
+    lda LINEBUF+4,x
+    cmp #'T'
+    bne @no
+    lda LINEBUF+5,x
     beq @yes
     cmp #$20
     bne @no
@@ -7897,6 +7935,52 @@ mv_usage:
     rts
 
 ; ------------------------------------------------------------
+; cmd_reset
+; RESET
+;
+; Clears the entire RAM filesystem after user confirmation.
+;
+; Behavior:
+;   - Prints a warning and prompts the user to type Y + RETURN
+;   - If confirmed, calls fs_init to wipe directory and heap
+;   - Otherwise prints ABORTED and returns
+; ------------------------------------------------------------
+cmd_reset:
+    lda #13
+    jsr CHROUT
+    lda #<reset_confirm_txt
+    sta ZPTR_LO
+    lda #>reset_confirm_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+    lda LINEBUF
+    cmp #'Y'
+    bne @abort
+    jsr fs_init
+    lda #13
+    jsr CHROUT
+    lda #<reset_ok_txt
+    sta ZPTR_LO
+    lda #>reset_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+@abort:
+    lda #13
+    jsr CHROUT
+    lda #<reset_abort_txt
+    sta ZPTR_LO
+    lda #>reset_abort_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+; ------------------------------------------------------------
 ; cmd_passwd
 ; Change password with confirmation, then save to disk
 ; ------------------------------------------------------------
@@ -8595,6 +8679,7 @@ help_txt_part2:
 !text "  NANO    - EDIT FILE",13
 !text "  PASSWD  - CHANGE PASSWORD",13
 !text "  PWD     - SHOW CURRENT PATH",13
+!text "  RESET   - CLEAR RAM FILESYSTEM",13
 !text "  RM      - DELETE FILE",13
 !text "  SAVE    - SAVE FILE FROM RAM TO DISK",13
 !text "             SAVE 9:FILE, SAVE 10:FILE",13
@@ -8829,6 +8914,16 @@ config_loaded_txt:
 
 passwd_ok_txt:
 !text "PASSWORD CHANGED.",0
+
+reset_confirm_txt:
+!text "WARNING: ALL RAM FILES WILL BE LOST.",13
+!text "TYPE Y TO CONFIRM: ",0
+
+reset_ok_txt:
+!text "FILESYSTEM RESET.",0
+
+reset_abort_txt:
+!text "ABORTED.",0
 
 config_fname_r:
 !text "CONFIG,S,R",0
