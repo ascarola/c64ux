@@ -1,17 +1,23 @@
 ; ============================================================
 ;  C64UX — Unix-inspired shell for the Commodore 64
 ;
-;  Version:    v0.1
+;  Version:    v0.7
 ;  Author:     Anthony Scarola <a@scarolas.com>
-;  Date:       2026-01-26
+;  Date:       2026-02-02
 ;
 ;  Description:
 ;    A small UNIX-like command shell and RAM-resident filesystem
 ;    written entirely in 6502 assembly for the Commodore 64.
 ;
 ;    Features include a command parser, in-memory filesystem,
-;    file metadata (size/date/time), session user/date/time,
-;    and an auto-advancing clock based on the KERNAL jiffy timer.
+;    file metadata (size/date/time), session user/date/time, a
+;    nano-style editor, an auto-advancing clock based on
+;    the KERNAL jiffy timer, and SAVE/LOAD commands for
+;    bridging RAM filesystem with disk storage (device 8). In
+;    addition, if an REU is present, commands exist to
+;    support saving to, loading from, and wiping the
+;    REU. A credentialing process and color themes have
+;    also been added.
 ;
 ;  License:    MIT (see LICENSE file)
 ;  Assembler:  ACME
@@ -34,23 +40,34 @@ next:
 ; 2) Program entry address
 ; ------------------------------------------------------------
 * = $0810
+    jmp start
 
 ; ------------------------------------------------------------
 ; 3) KERNAL entry points
 ; ------------------------------------------------------------
-CHROUT = $FFD2
 CHRIN  = $FFCF
+CHROUT = $FFD2
 
 RDTIM  = $FFDE     ; Read jiffy clock -> A=lo, X=mid, Y=hi
 SETTIM = $FFDB     ; Set jiffy clock  <- A=lo, X=mid, Y=hi
 
 TICKS_PER_SEC = 60 ; NTSC=60, PAL=50
 
+; added these for the DOS command
+SETNAM = $FFBD
+SETLFS = $FFBA
+OPEN   = $FFC0
+CLOSE  = $FFC3
+CHKIN  = $FFC6
+CHKOUT = $FFC9
+CLRCHN = $FFCC
+READST = $FFB7
+
 ; ------------------------------------------------------------
 ; 4) Memory map / buffers
 ; ------------------------------------------------------------
 LINEBUF = $0200
-MAXLEN  = 40
+MAXLEN  = 200
 
 CUR_TIME: !fill 8, '0'   ; HH:MM:SS (no zero terminator)
 
@@ -87,14 +104,43 @@ DPTR_LO = $FD
 DPTR_HI = $FE
 
 ; ------------------------------------------------------------
-; 7) Main entry / init
+; 8) REU
+; ------------------------------------------------------------
+REU_STATUS  = $DF00
+REU_COMMAND = $DF01
+
+REU_C64_LO  = $DF02
+REU_C64_HI  = $DF03
+
+REU_REU_LO  = $DF04
+REU_REU_MID = $DF05
+REU_REU_HI  = $DF06
+
+REU_LEN_LO  = $DF07
+REU_LEN_HI  = $DF08
+
+REU_IMASK   = $DF09
+REU_ADDRCTL = $DF0A
+
+; ------------------------------------------------------------
+; 8) Misc.
+; ------------------------------------------------------------
+
+C64UX_VERSION = "V0.7"
+C64UX_BUILD_DATE = "08 FEB 2026"
+
+; ------------------------------------------------------------
+; 8) Main entry / init
 ; ------------------------------------------------------------
 start:
     sei
+    lda #0
+    sta theme_mode       ; reset to NORMAL on every RUN
     jsr cls
+    jsr boot_sequence
     jsr banner
-    jsr fs_init
     jsr setup
+    jsr apply_theme      ; re-apply after banner's white PETSCII override
     cli
 
 main_loop:
@@ -103,6 +149,234 @@ main_loop:
 ;    jsr dump_linebuf     ; <<< DEBUG: show raw bytes
     jsr exec_cmd
     jmp main_loop
+
+; ============================================================
+; BOOT SEQUENCE
+; ============================================================
+
+; ------------------------------------------------------------
+; boot_delay — busy-wait ~0.3s (18 jiffies @ 60 Hz NTSC)
+; Uses KERNAL RDTIM; clobbers A, X, Y
+; ------------------------------------------------------------
+boot_delay:
+    jsr RDTIM            ; A=lo, X=mid, Y=hi
+    clc
+    adc #18              ; target = now + 18 jiffies
+    sta boot_delay_tgt
+@wait:
+    jsr RDTIM
+    cmp boot_delay_tgt
+    bcc @wait
+    rts
+
+boot_delay_tgt: !byte 0
+
+; ------------------------------------------------------------
+; boot_print_line — print "[  OK  ] " prefix + message + CR
+;   Message address must be in ZPTR_LO/ZPTR_HI before call.
+;   Calls boot_delay after printing.
+; ------------------------------------------------------------
+boot_print_line:
+    lda #<boot_ok_txt
+    sta PTR_LO
+    lda #>boot_ok_txt
+    sta PTR_HI
+    ldy #0
+@pfx:
+    lda (PTR_LO),y
+    beq @msg
+    jsr CHROUT
+    iny
+    bne @pfx
+@msg:
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jsr boot_delay
+    rts
+
+; ------------------------------------------------------------
+; boot_sequence — systemd-style boot scroll
+;   Calls fs_init and reu_detect at the appropriate points.
+;   Clears screen when done so banner appears fresh.
+; ------------------------------------------------------------
+boot_sequence:
+    ; Line 1: STARTING C64UX KERNEL V0.7
+    lda #<boot_kern_txt
+    sta ZPTR_LO
+    lda #>boot_kern_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+
+    ; Line 2: MEMORY CHECK: 64K RAM SYSTEM
+    lda #<boot_mem_txt
+    sta ZPTR_LO
+    lda #>boot_mem_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+
+    ; Line 3: INITIALIZING FILESYSTEM (real: call fs_init)
+    lda #<boot_fs_txt
+    sta ZPTR_LO
+    lda #>boot_fs_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+    jsr fs_init
+
+    ; Line 4: HEAP ALLOCATED AT $6000
+    lda #<boot_heap_txt
+    sta ZPTR_LO
+    lda #>boot_heap_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+
+    ; Line 5: DETECTING HARDWARE
+    lda #<boot_hw_txt
+    sta ZPTR_LO
+    lda #>boot_hw_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+
+    ; Line 6: REU result (conditional on reu_detect carry)
+    jsr reu_detect
+    bcc @no_reu
+    lda #<boot_reu_yes_txt
+    sta ZPTR_LO
+    lda #>boot_reu_yes_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+    jmp @reu_done
+@no_reu:
+    lda #<boot_reu_no_txt
+    sta ZPTR_LO
+    lda #>boot_reu_no_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+@reu_done:
+
+    ; Line 7: LOADING DEVICE DRIVERS
+    lda #<boot_drv_txt
+    sta ZPTR_LO
+    lda #>boot_drv_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+
+    ; Line 8: MOUNTING /DEV/DISK (DEVICE 8)
+    lda #<boot_mnt_txt
+    sta ZPTR_LO
+    lda #>boot_mnt_txt
+    sta ZPTR_HI
+    jsr boot_print_line
+
+    ; Final pause, then apply theme and clear screen for banner
+    jsr boot_delay
+    jsr apply_theme
+    jsr cls
+    rts
+
+; ------------------------------------------------------------
+; reu_exec_dma
+; A = command ($90 = C64->REU, $91 = REU->C64) with EXEC+FF00
+; Refuses LEN=$0000 (because 0 == 64K on real REU)
+; ------------------------------------------------------------
+reu_exec_dma:
+    pha                     ; Save command first!
+
+    lda REU_LEN_LO
+    ora REU_LEN_HI
+    bne reu_dma_exec
+
+    ; Length is zero, skip DMA
+    pla                     ; Clean up stack
+    rts
+
+reu_dma_exec:
+    ; Set "unused bits" the way REUs expect
+    lda #$1F
+    sta REU_IMASK
+    lda #$3F
+    sta REU_ADDRCTL
+
+    ; Clear status flags by reading STATUS before command (esp compare/fault)
+    lda REU_STATUS
+
+    pla                     ; Restore command
+    sta REU_COMMAND
+    rts
+
+reu_c64_to_reu:
+    lda #$90
+    jmp reu_exec_dma
+
+reu_reu_to_c64:
+    lda #$91
+    jmp reu_exec_dma
+
+; ------------------------------------------------------------
+; reu_detect
+; C=1 if present and working, C=0 if absent or not working
+; Tests DMA at safe address $000FF (between dir and heap)
+; ------------------------------------------------------------
+reu_detect:
+    lda REU_STATUS
+    cmp #$FF
+    beq reu_not_found
+
+    ; Write test pattern to safe REU address $000FF
+    lda #$A5
+    sta reu_test_byte
+    lda #<reu_test_byte
+    sta REU_C64_LO
+    lda #>reu_test_byte
+    sta REU_C64_HI
+    lda #$FF
+    sta REU_REU_LO
+    lda #0
+    sta REU_REU_MID
+    sta REU_REU_HI
+    lda #1
+    sta REU_LEN_LO
+    lda #0
+    sta REU_LEN_HI
+    jsr reu_c64_to_reu
+
+    ; Read it back
+    lda #0
+    sta reu_test_byte
+    lda #<reu_test_byte
+    sta REU_C64_LO
+    lda #>reu_test_byte
+    sta REU_C64_HI
+    lda #$FF
+    sta REU_REU_LO
+    lda #0
+    sta REU_REU_MID
+    sta REU_REU_HI
+    lda #1
+    sta REU_LEN_LO
+    lda #0
+    sta REU_LEN_HI
+    jsr reu_reu_to_c64
+
+    ; Check if we got test pattern back
+    lda reu_test_byte
+    cmp #$A5
+    bne reu_not_found
+    sec
+    rts
+
+reu_not_found:
+    clc
+    rts
+
+reu_test_byte:
+    !byte 0
+
+reu_metadata:
+    !byte 0,0,0,0   ; magic, dir_count, heap_lo, heap_hi
+
+reu_metadata_chk:
+    !byte 0,0,0,0
 
 ; ============================================================
 ; CONSOLE / UI ROUTINES
@@ -120,25 +394,49 @@ banner:
     inx
     bne @loop
 @exit:
+    ; Check for REU and print status if present
+    jsr reu_detect
+    bcc @no_reu
+    lda #<reu_banner_txt
+    sta ZPTR_LO
+    lda #>reu_banner_txt
+    sta ZPTR_HI
+    jsr print_z
+@no_reu:
+    ; Print help message
+    lda #<banner_help_txt
+    sta ZPTR_LO
+    lda #>banner_help_txt
+    sta ZPTR_HI
+    jsr print_z
     rts
 
 
 ; ------------------------------------------------------------
-; prompt - print newline + prompt string (prompt_txt)
+; prompt - print newline + @username>@prompt string (prompt_tail_txt)
 ; ------------------------------------------------------------
 prompt:
     lda #13
     jsr CHROUT
+
+    ; print USERNAME
+    lda #<USERNAME
+    sta ZPTR_LO
+    lda #>USERNAME
+    sta ZPTR_HI
+    jsr print_z
+
+    ; print prompt string
     ldx #0
-@loop:
-    lda prompt_txt,x
-    beq @exit
+@p2:
+    lda prompt_tail_txt,x
+    beq @done
     jsr CHROUT
     inx
-    bne @loop
-@exit:
-    rts
+    bne @p2
 
+@done:
+    rts
 
 ; ------------------------------------------------------------
 ; cls - clear screen (SHIFT+CLR/HOME = PETSCII 147)
@@ -147,6 +445,24 @@ cls:
     lda #147
     jsr CHROUT
     rts
+
+; ------------------------------------------------------------
+; apply_theme — set border, background and text colour from
+;               theme_mode (0=NORMAL, 1=DARK, 2=GREEN)
+; ------------------------------------------------------------
+apply_theme:
+    ldx theme_mode
+    lda theme_border,x
+    sta $D020
+    lda theme_bg,x
+    sta $D021
+    lda theme_fg,x
+    sta $0286
+    rts
+
+theme_border: !byte 14, 0, 0    ; NORMAL, DARK, GREEN
+theme_bg:     !byte  6, 0, 0
+theme_fg:     !byte  1,15, 5
 
 ; -------------------------
 ; Read a line (blocking)
@@ -159,9 +475,9 @@ read_line:
     cmp #13            ; RETURN ends the line
     beq @end
 
-    cmp #20            ; DEL (backspace) in many setups
+    cmp #20            ; DEL (backspace)
     beq @bksp
-    cmp #157           ; cursor-left (some keymaps send this)
+    cmp #157           ; cursor-left
     beq @bksp
 
     cpx #MAXLEN
@@ -237,11 +553,60 @@ DATE_MAX = 11      ; "YYYY-MM-DD" + 0
 TIME_MAX = 9       ; "HH:MM:SS" + 0
 
 setup:
-    jsr setup_username
+    jsr load_config          ; try to load CONFIG from disk
+    bcc @full_setup          ; carry clear = not found -> full setup
+
+    ; Config loaded successfully
+    lda #1
+    sta config_loaded
+    lda #<setup_header_txt
+    sta ZPTR_LO
+    lda #>setup_header_txt
+    sta ZPTR_HI
+    jsr print_z
     jsr setup_date
     jsr setup_time
+    jsr init_clock
+    jsr login_prompt         ; authenticate user
+    rts
+
+@full_setup:
+    lda #0
+    sta config_loaded
+    lda #<setup_header_txt
+    sta ZPTR_LO
+    lda #>setup_header_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr setup_username
+    jsr setup_password
+    jsr setup_date
+    jsr setup_time
+    jsr init_clock
+    jsr save_config          ; persist credentials to disk
+    rts
+
+; ------------------------------------------------------------
+; init_clock
+; Initialize clock, uptime baseline, and day-rollover tracking
+; ------------------------------------------------------------
+init_clock:
     jsr set_clock_from_time_str
+
+    ; Initialize rollover tracker + uptime baseline
     jsr read_clock_to_jiffies
+    jsr jiffies_to_seconds16        ; -> sec_lo/sec_hi (my routine's outputs)
+
+    lda sec_lo
+    sta BOOT_SEC_LO
+    lda sec_hi
+    sta BOOT_SEC_HI
+
+    lda #0
+    sta UP_DAYS_LO
+    sta UP_DAYS_HI
+
+    ; Initialize day-rollover detection
     lda jlo
     sta LAST_JLO
     lda jmid
@@ -254,16 +619,11 @@ setup:
 ; setup_username
 ; ------------------------------------------------------------
 setup_username:
-    lda #13
-    jsr CHROUT
-
-    ldx #0
-@p:
-    lda setup_user_txt,x
-    beq @read
-    jsr CHROUT
-    inx
-    bne @p
+    lda #<setup_user_txt
+    sta ZPTR_LO
+    lda #>setup_user_txt
+    sta ZPTR_HI
+    jsr print_z
 
 @read:
     jsr read_line
@@ -291,6 +651,365 @@ setup_username:
     lda #0
     sta USERNAME+USER_MAX-1
 @done:
+    rts
+
+; ------------------------------------------------------------
+; setup_password
+; Asks for password with confirmation, stores in PASSWORD
+; ------------------------------------------------------------
+setup_password:
+@again:
+    lda #13
+    jsr CHROUT
+    lda #<setup_pass_txt
+    sta ZPTR_LO
+    lda #>setup_pass_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+
+    ; Copy LINEBUF to PASSWORD
+    ldx #0
+@cp:
+    lda LINEBUF,x
+    sta PASSWORD,x
+    beq @copied
+    inx
+    cpx #USER_MAX-1
+    bcc @cp
+    lda #0
+    sta PASSWORD+USER_MAX-1
+@copied:
+
+    ; Ask for confirmation
+    lda #13
+    jsr CHROUT
+    lda #<setup_confirm_txt
+    sta ZPTR_LO
+    lda #>setup_confirm_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+
+    ; Compare LINEBUF against PASSWORD
+    ldx #0
+@cmp:
+    lda PASSWORD,x
+    beq @chk_end
+    cmp LINEBUF,x
+    bne @mismatch
+    inx
+    cpx #USER_MAX
+    bne @cmp
+    beq @match
+@chk_end:
+    lda LINEBUF,x
+    bne @mismatch
+@match:
+    lda #13
+    jsr CHROUT
+    rts
+@mismatch:
+    lda #13
+    jsr CHROUT
+    lda #<pass_mismatch_txt
+    sta ZPTR_LO
+    lda #>pass_mismatch_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jmp @again
+
+; ------------------------------------------------------------
+; login_prompt
+; Authenticate user (3 attempts, then exit to BASIC)
+; ------------------------------------------------------------
+login_prompt:
+    lda #0
+    sta login_attempts
+
+@retry:
+    lda #13
+    jsr CHROUT
+    lda #<login_user_txt
+    sta ZPTR_LO
+    lda #>login_user_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+
+    ; Compare LINEBUF with USERNAME
+    lda #0
+    sta login_user_ok
+    ldx #0
+@cmp_u:
+    lda USERNAME,x
+    beq @chk_u_end
+    cmp LINEBUF,x
+    bne @u_no
+    inx
+    cpx #USER_MAX
+    bne @cmp_u
+    beq @u_yes
+@chk_u_end:
+    lda LINEBUF,x
+    bne @u_no
+@u_yes:
+    lda #1
+    sta login_user_ok
+@u_no:
+
+    lda #13
+    jsr CHROUT
+    lda #<login_pass_txt
+    sta ZPTR_LO
+    lda #>login_pass_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+
+    ; Compare LINEBUF with PASSWORD
+    ldx #0
+@cmp_p:
+    lda PASSWORD,x
+    beq @chk_p_end
+    cmp LINEBUF,x
+    bne @p_fail
+    inx
+    cpx #USER_MAX
+    bne @cmp_p
+    beq @p_ok
+@chk_p_end:
+    lda LINEBUF,x
+    bne @p_fail
+@p_ok:
+    ; Password matched, check username too
+    lda login_user_ok
+    bne @success
+
+@p_fail:
+    lda #13
+    jsr CHROUT
+    lda #<login_fail_txt
+    sta ZPTR_LO
+    lda #>login_fail_txt
+    sta ZPTR_HI
+    jsr print_z
+
+    inc login_attempts
+    lda login_attempts
+    cmp #3
+    bcc @retry
+
+    ; 3 failed attempts -> exit to BASIC
+    lda #13
+    jsr CHROUT
+    lda #<login_locked_txt
+    sta ZPTR_LO
+    lda #>login_locked_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jmp $A474          ; BASIC warm start
+
+@success:
+    lda #13
+    jsr CHROUT
+    rts
+
+; ------------------------------------------------------------
+; load_config
+; Try to load CONFIG,S,R from default_drive
+; On success: USERNAME and PASSWORD populated, carry set
+; On failure: carry clear
+; ------------------------------------------------------------
+load_config:
+    ; Build filename "CONFIG,S,R" using config_fname_r
+    ldx #0
+@copy_r:
+    lda config_fname_r,x
+    beq @copy_r_done
+    sta DOSFNAME,x
+    inx
+    bne @copy_r
+@copy_r_done:
+    ; X = length of "CONFIG,S,R" = 10
+    txa
+    ldx #<DOSFNAME
+    ldy #>DOSFNAME
+    jsr SETNAM
+
+    lda #2
+    ldx default_drive
+    ldy #0               ; SA=0 = SEQ read
+    jsr SETLFS
+
+    jsr OPEN
+    jsr READST
+    bne @fail
+
+    ldx #2
+    jsr CHKIN
+    jsr READST
+    bne @fail_close
+
+    ; Read USERNAME until CR ($0D)
+    ldx #0
+@read_user:
+    jsr CHRIN
+    cmp #$0D
+    beq @user_done
+    cpx #USER_MAX-1
+    bcs @read_user       ; skip extra chars
+    sta USERNAME,x
+    inx
+    jmp @read_user
+@user_done:
+    lda #0
+    sta USERNAME,x
+
+    ; Check for read error
+    jsr READST
+    and #$BF             ; mask out EOI
+    bne @fail_close
+
+    ; Read PASSWORD until CR ($0D)
+    ldx #0
+@read_pass:
+    jsr CHRIN
+    cmp #$0D
+    beq @pass_done
+    cpx #USER_MAX-1
+    bcs @read_pass       ; skip extra chars
+    sta PASSWORD,x
+    inx
+    jmp @read_pass
+@pass_done:
+    lda #0
+    sta PASSWORD,x
+
+    ; Close and clean up
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+
+    ; Print success
+    lda #13
+    jsr CHROUT
+    lda #<config_loaded_txt
+    sta ZPTR_LO
+    lda #>config_loaded_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+
+    sec                  ; success
+    rts
+
+@fail_close:
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    clc                  ; failure
+    rts
+
+@fail:
+    jsr CLRCHN
+    clc                  ; failure
+    rts
+
+; ------------------------------------------------------------
+; save_config
+; Save USERNAME and PASSWORD to CONFIG,S,W on default_drive
+; ------------------------------------------------------------
+save_config:
+    ; Build filename "CONFIG,S,W" using config_fname_w
+    ldx #0
+@copy_w:
+    lda config_fname_w,x
+    beq @copy_w_done
+    sta DOSFNAME,x
+    inx
+    bne @copy_w
+@copy_w_done:
+    ; X = length of "CONFIG,S,W" = 10
+    txa
+    ldx #<DOSFNAME
+    ldy #>DOSFNAME
+    jsr SETNAM
+
+    lda #2
+    ldx default_drive
+    ldy #1               ; SA=1 = SEQ write
+    jsr SETLFS
+
+    jsr OPEN
+    jsr READST
+    beq @open_ok
+    jmp @write_fail
+
+@open_ok:
+    ldx #2
+    jsr CHKOUT
+    jsr READST
+    beq @chkout_ok
+    jmp @chkout_fail
+
+@chkout_ok:
+    ; Write USERNAME bytes until null, then CR
+    ldx #0
+@wu:
+    lda USERNAME,x
+    beq @wu_done
+    jsr CHROUT
+    inx
+    cpx #USER_MAX
+    bne @wu
+@wu_done:
+    lda #$0D
+    jsr CHROUT
+
+    ; Write PASSWORD bytes until null, then CR
+    ldx #0
+@wp:
+    lda PASSWORD,x
+    beq @wp_done
+    jsr CHROUT
+    inx
+    cpx #USER_MAX
+    bne @wp
+@wp_done:
+    lda #$0D
+    jsr CHROUT
+
+    ; Close and clean up
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+
+    ; Print success
+    lda #13
+    jsr CHROUT
+    lda #<config_saved_txt
+    sta ZPTR_LO
+    lda #>config_saved_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+@chkout_fail:
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    rts
+
+@write_fail:
+    jsr CLRCHN
     rts
 
 ; ------------------------------------------------------------
@@ -701,11 +1420,13 @@ seconds16_to_hms:
 ; update_day_rollover
 ; - Detects midnight rollover by comparing current jiffies to LAST_J*
 ; - If current jiffies < last jiffies => clock wrapped => new day
-; - Then calls inc_date_str to bump DATE_STR by 1 day
-; - Updates LAST_J* to current jiffies
+; - On rollover:
+;     * increments DATE_STR by 1 day (inc_date_str)
+;     * increments UPTIME day counter (UP_DAYS)
+; - Always updates LAST_J* to current jiffies
 ;
 ; Uses: A
-; Clobbers: jlo/jmid/jhi (your existing scratch)
+; Clobbers: jlo/jmid/jhi (via read_clock_to_jiffies)
 ; ------------------------------------------------------------
 update_day_rollover:
     jsr read_clock_to_jiffies     ; sets jlo/jmid/jhi
@@ -730,7 +1451,12 @@ update_day_rollover:
     jmp @save
 
 @wrapped:
-    jsr inc_date_str
+    jsr inc_date_str              ; DATE_STR = DATE_STR + 1 day
+
+    ; UPTIME days++ (counts midnights passed since boot)
+    inc UP_DAYS_LO
+    bne @save
+    inc UP_DAYS_HI                ; carry into high byte if low wrapped
 
 @save:
     lda jlo
@@ -996,6 +1722,73 @@ print_2d:
     jsr CHROUT
     rts
 
+; ------------------------------------------------------------
+; print_drive_status
+; Opens device 8, channel 15, and prints the full status line.
+; Reads until CR ($0D). Always restores channels.
+; ------------------------------------------------------------
+print_drive_status:
+    ; SETNAM length=0 (empty name)
+    lda #0
+    ldx #0
+    ldy #0
+    jsr SETNAM
+
+    ; SETLFS(LA=15, DEV=default, SA=15)
+    lda #15
+    ldx default_drive
+    ldy #15
+    jsr SETLFS
+
+    jsr OPEN
+    jsr READST
+    bne pds_open_fail
+
+    ; Redirect input to logical file 15
+    ldx #15
+    jsr CHKIN
+    jsr READST
+    bne pds_chkin_fail
+
+pds_loop:
+    jsr CHRIN          ; read from drive channel 15
+    cmp #$0D           ; CR ends the status line
+    beq pds_done
+
+    jsr CHROUT
+    jmp pds_loop
+
+pds_done:
+    lda #13
+    jsr CHROUT
+    jmp pds_cleanup
+
+pds_open_fail:
+    lda #<dos_openfail_txt
+    sta ZPTR_LO
+    lda #>dos_openfail_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jmp pds_cleanup
+
+pds_chkin_fail:
+    lda #<dos_nochan_txt
+    sta ZPTR_LO
+    lda #>dos_nochan_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jmp pds_cleanup
+
+pds_cleanup:
+    jsr CLRCHN
+    lda #15
+    jsr CLOSE
+    rts
+
 ; ============================================================
 ; COMMAND DISPATCH
 ; ============================================================
@@ -1031,8 +1824,15 @@ exec_cmd:
 
     ; HELP?
     jsr is_help
-    bcc @try_echo
+    bcc @try_dos
     jsr cmd_help
+    rts
+
+@try_dos:
+    ; DOS?
+    jsr is_dos
+    bcc @try_echo
+    jsr cmd_dos
     rts
 
 @try_echo:
@@ -1079,8 +1879,15 @@ exec_cmd:
 @try_uname:
     ; UNAME?
     jsr is_uname
-    bcc @try_exit
+    bcc @try_version
     jsr cmd_uname
+    rts
+
+@try_version:
+    ; VERSION?
+    jsr is_version
+    bcc @try_exit
+    jsr cmd_version
     rts
 
 @try_exit:
@@ -1112,15 +1919,103 @@ exec_cmd:
 
 @try_time:
     jsr is_time
-    bcc @try_clear
+    bcc @try_uptime
     jsr cmd_time
+    rts
+
+@try_uptime:
+    jsr is_uptime
+    bcc @try_pwd
+    jsr cmd_uptime
+    rts
+
+@try_pwd:
+    jsr is_pwd
+    bcc @try_nano
+    jsr cmd_pwd
+    rts
+
+@try_nano
+    jsr is_nano
+    bcc @try_clear
+    jsr cmd_nano
     rts
 
 @try_clear:
     ; CLEAR?
     jsr is_clear
-    bcc @unknown
+    bcc @try_drive
     jsr cls
+    rts
+
+@try_drive:
+    ; DRIVE?
+    jsr is_drive
+    bcc @try_save
+    jsr cmd_drive
+    rts
+
+@try_save:
+    ; SAVE?
+    jsr is_save
+    bcc @try_load
+    jsr cmd_save
+    rts
+
+@try_load:
+    ; LOAD?
+    jsr is_load
+    bcc @try_loadreu
+    jsr cmd_load
+    rts
+
+@try_loadreu:
+    ; LOADREU?
+    jsr is_loadreu
+    bcc @try_savereu
+    jsr cmd_loadreu
+    rts
+
+@try_savereu:
+    ; SAVEREU?
+    jsr is_savereu
+    bcc @try_wipereu
+    jsr cmd_savereu
+    rts
+
+@try_wipereu:
+    ; WIPEREU?
+    jsr is_wipereu
+    bcc @try_cp
+    jsr cmd_wipereu
+    rts
+
+@try_cp:
+    ; CP?
+    jsr is_cp
+    bcc @try_mv
+    jsr cmd_cp
+    rts
+
+@try_mv:
+    ; MV?
+    jsr is_mv
+    bcc @try_passwd
+    jsr cmd_mv
+    rts
+
+@try_passwd:
+    ; PASSWD?
+    jsr is_passwd
+    bcc @try_theme
+    jsr cmd_passwd
+    rts
+
+@try_theme:
+    ; THEME?
+    jsr is_theme
+    bcc @unknown
+    jsr cmd_theme
     rts
 
 ; ------------------------------------------------------------
@@ -1416,6 +2311,129 @@ is_mem:
     rts
 
 ; ------------------------------------------------------------
+; is_loadreu
+; Matches "LOADREU"
+; ------------------------------------------------------------
+is_loadreu:
+    lda LINEBUF,x
+    cmp #'L'
+    bne is_loadreu_no
+    lda LINEBUF+1,x
+    cmp #'O'
+    bne is_loadreu_no
+    lda LINEBUF+2,x
+    cmp #'A'
+    bne is_loadreu_no
+    lda LINEBUF+3,x
+    cmp #'D'
+    bne is_loadreu_no
+    lda LINEBUF+4,x
+    cmp #'R'
+    bne is_loadreu_no
+    lda LINEBUF+5,x
+    cmp #'E'
+    bne is_loadreu_no
+    lda LINEBUF+6,x
+    cmp #'U'
+    bne is_loadreu_no
+
+    ; Next char must be EOL or space
+    lda LINEBUF+7,x
+    beq is_loadreu_yes
+    cmp #$20
+    beq is_loadreu_yes
+
+is_loadreu_no:
+    clc
+    rts
+
+is_loadreu_yes:
+    sec
+    rts
+
+; ------------------------------------------------------------
+; is_savereu
+; Matches "SAVEREU"
+; ------------------------------------------------------------
+is_savereu:
+    lda LINEBUF,x
+    cmp #'S'
+    bne is_savereu_no
+    lda LINEBUF+1,x
+    cmp #'A'
+    bne is_savereu_no
+    lda LINEBUF+2,x
+    cmp #'V'
+    bne is_savereu_no
+    lda LINEBUF+3,x
+    cmp #'E'
+    bne is_savereu_no
+    lda LINEBUF+4,x
+    cmp #'R'
+    bne is_savereu_no
+    lda LINEBUF+5,x
+    cmp #'E'
+    bne is_savereu_no
+    lda LINEBUF+6,x
+    cmp #'U'
+    bne is_savereu_no
+
+    ; Next char must be EOL or space
+    lda LINEBUF+7,x
+    beq is_savereu_yes
+    cmp #$20
+    beq is_savereu_yes
+
+is_savereu_no:
+    clc
+    rts
+
+is_savereu_yes:
+    sec
+    rts
+
+; ------------------------------------------------------------
+; is_wipereu
+; Matches "WIPEREU"
+; ------------------------------------------------------------
+is_wipereu:
+    lda LINEBUF,x
+    cmp #'W'
+    bne is_wipereu_no
+    lda LINEBUF+1,x
+    cmp #'I'
+    bne is_wipereu_no
+    lda LINEBUF+2,x
+    cmp #'P'
+    bne is_wipereu_no
+    lda LINEBUF+3,x
+    cmp #'E'
+    bne is_wipereu_no
+    lda LINEBUF+4,x
+    cmp #'R'
+    bne is_wipereu_no
+    lda LINEBUF+5,x
+    cmp #'E'
+    bne is_wipereu_no
+    lda LINEBUF+6,x
+    cmp #'U'
+    bne is_wipereu_no
+
+    ; Next char must be EOL or space
+    lda LINEBUF+7,x
+    beq is_wipereu_yes
+    cmp #$20
+    beq is_wipereu_yes
+
+is_wipereu_no:
+    clc
+    rts
+
+is_wipereu_yes:
+    sec
+    rts
+
+; ------------------------------------------------------------
 ; is_uname
 ; ------------------------------------------------------------
 ; Command matcher for "UNAME"
@@ -1456,6 +2474,160 @@ is_uname:
     beq @yes
     cmp #$20
     bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_clear
+; ------------------------------------------------------------
+; Command matcher: CLEAR or CLS
+;
+; Accepts:
+;   "CLEAR"
+;   "CLS"
+; followed by end-of-line (0) or space ($20)
+;
+; Input:
+;   X = index into LINEBUF
+;
+; Output:
+;   C = 1 if match
+;   C = 0 if not match
+;
+; Clobbers:
+;   A
+; ------------------------------------------------------------
+is_clear:
+    lda LINEBUF,x
+    cmp #'C'
+    bne @no
+
+    lda LINEBUF+1,x
+    cmp #'L'
+    bne @no
+
+    lda LINEBUF+2,x
+    cmp #'S'
+    beq @cls_tail     ; <-- CLS matched
+
+    ; otherwise must be CLEAR
+    cmp #'E'
+    bne @no
+
+    lda LINEBUF+3,x
+    cmp #'A'
+    bne @no
+
+    lda LINEBUF+4,x
+    cmp #'R'
+    bne @no
+
+    lda LINEBUF+5,x
+    beq @yes
+    cmp #$20          ; space
+    beq @yes
+    bne @no
+
+@cls_tail:
+    lda LINEBUF+3,x
+    beq @yes
+    cmp #$20
+    beq @yes
+
+@yes:
+    sec
+    rts
+
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_dos
+; ------------------------------------------------------------
+; Matches:
+;   "DOS" + end-of-line
+;   "DOS " + args
+; ------------------------------------------------------------
+is_dos:
+    lda LINEBUF,x
+    cmp #'D'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'O'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'S'
+    bne @no
+    lda LINEBUF+3,x
+    beq @yes
+    cmp #$20
+    beq @yes
+@no:
+    clc
+    rts
+@yes:
+    sec
+    rts
+
+; ------------------------------------------------------------
+; is_version
+; ------------------------------------------------------------
+; Command matcher: VERSION (alias: VER)
+;
+; Accepts:
+;   "VERSION" or "VER"
+; followed by end-of-line (0) or space ($20)
+;
+; Input:
+;   X = index into LINEBUF
+;
+; Output:
+;   C = 1 if match
+;   C = 0 if not match
+;
+; Clobbers:
+;   A
+; ------------------------------------------------------------
+is_version:
+    lda LINEBUF,x
+    cmp #'V'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'E'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'R'
+    bne @no
+
+    ; If end/space here -> "VER"
+    lda LINEBUF+3,x
+    beq @yes
+    cmp #$20
+    beq @yes
+
+    ; Otherwise must be "VERSION"
+    cmp #'S'
+    bne @no
+    lda LINEBUF+4,x
+    cmp #'I'
+    bne @no
+    lda LINEBUF+5,x
+    cmp #'O'
+    bne @no
+    lda LINEBUF+6,x
+    cmp #'N'
+    bne @no
+
+    lda LINEBUF+7,x
+    beq @yes
+    cmp #$20
+    bne @no
+
 @yes:
     sec
     rts
@@ -1652,9 +2824,920 @@ is_time:
     clc
     rts
 
+; ------------------------------------------------------------
+; is_uptime
+; ------------------------------------------------------------
+; Command matcher: UPTIME
+;
+; Accepts:
+;   "UPTIME" followed by end-of-line (0)
+;   "UPTIME" followed by a space ($20) and arguments
+;
+; Input:
+;   X = index into LINEBUF (start position to test)
+;
+; Output:
+;   C = 1 if match
+;   C = 0 if not a match
+;
+; Clobbers:
+;   A
+; ------------------------------------------------------------
+is_uptime:
+    lda LINEBUF,x
+    cmp #'U'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'P'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'T'
+    bne @no
+    lda LINEBUF+3,x
+    cmp #'I'
+    bne @no
+    lda LINEBUF+4,x
+    cmp #'M'
+    bne @no
+    lda LINEBUF+5,x
+    cmp #'E'
+    bne @no
+    lda LINEBUF+6,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_pwd
+; ------------------------------------------------------------
+; Matcher for PWD command.
+; Accepts:
+;   "PWD" (end of line) or "PWD " (space after keyword)
+;
+; In:
+;   X = index into LINEBUF (start of command)
+; Out:
+;   C = 1 if match, C = 0 otherwise
+; ------------------------------------------------------------
+is_pwd:
+    lda LINEBUF,x
+    cmp #'P'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'W'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'D'
+    bne @no
+    lda LINEBUF+3,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_nano
+; Matches:
+;   "NANO" + EOL
+;   "NANO " + args
+; ------------------------------------------------------------
+is_nano:
+    lda LINEBUF,x
+    cmp #'N'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'A'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'N'
+    bne @no
+    lda LINEBUF+3,x
+    cmp #'O'
+    bne @no
+    lda LINEBUF+4,x
+    beq @yes
+    cmp #$20
+    beq @yes
+@no:
+    clc
+    rts
+@yes:
+    sec
+    rts
+
+; ------------------------------------------------------------
+; is_drive
+; Matches command: DRIVE
+;
+; Input:
+;   X = index into LINEBUF
+;
+; Output:
+;   C = 1 if LINEBUF matches "DRIVE"
+;   C = 0 otherwise
+;
+; Notes:
+;   - Accepts "DRIVE" or "DRIVE <number>"
+; ------------------------------------------------------------
+is_drive:
+    lda LINEBUF,x
+    cmp #'D'
+    bne @no
+
+    lda LINEBUF+1,x
+    cmp #'R'
+    bne @no
+
+    lda LINEBUF+2,x
+    cmp #'I'
+    bne @no
+
+    lda LINEBUF+3,x
+    cmp #'V'
+    bne @no
+
+    lda LINEBUF+4,x
+    cmp #'E'
+    bne @no
+
+    lda LINEBUF+5,x
+    beq @yes
+    cmp #$20
+    beq @yes
+
+@no:
+    clc
+    rts
+
+@yes:
+    sec
+    rts
+
+; ------------------------------------------------------------
+; is_save
+; Matches command: SAVE
+;
+; Input:
+;   X = index into LINEBUF
+;
+; Output:
+;   C = 1 if LINEBUF matches "SAVE"
+;   C = 0 otherwise
+;
+; Notes:
+;   - Accepts "SAVE" or "SAVE <filename>"
+; ------------------------------------------------------------
+is_save:
+    lda LINEBUF,x
+    cmp #'S'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'A'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'V'
+    bne @no
+    lda LINEBUF+3,x
+    cmp #'E'
+    bne @no
+    lda LINEBUF+4,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_load
+; Matches command: LOAD
+;
+; Input:
+;   X = index into LINEBUF
+;
+; Output:
+;   C = 1 if LINEBUF matches "LOAD"
+;   C = 0 otherwise
+;
+; Notes:
+;   - Accepts "LOAD" or "LOAD <filename>"
+; ------------------------------------------------------------
+is_load:
+    lda LINEBUF,x
+    cmp #'L'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'O'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'A'
+    bne @no
+    lda LINEBUF+3,x
+    cmp #'D'
+    bne @no
+    lda LINEBUF+4,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_cp
+; Matches command: CP
+;
+; Input:
+;   X = index into LINEBUF
+;
+; Output:
+;   C = 1 if LINEBUF matches "CP"
+;   C = 0 otherwise
+;
+; Notes:
+;   - Accepts "CP" or "CP <source> <dest>"
+; ------------------------------------------------------------
+is_cp:
+    lda LINEBUF,x
+    cmp #'C'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'P'
+    bne @no
+    lda LINEBUF+2,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_mv
+; Matches command: MV
+;
+; Input:
+;   X = index into LINEBUF
+;
+; Output:
+;   C = 1 if LINEBUF matches "MV"
+;   C = 0 otherwise
+;
+; Notes:
+;   - Accepts "MV" or "MV <source> <dest>"
+; ------------------------------------------------------------
+is_mv:
+    lda LINEBUF,x
+    cmp #'M'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'V'
+    bne @no
+    lda LINEBUF+2,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_passwd
+; Matches command: PASSWD
+; ------------------------------------------------------------
+is_passwd:
+    lda LINEBUF,x
+    cmp #'P'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'A'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'S'
+    bne @no
+    lda LINEBUF+3,x
+    cmp #'S'
+    bne @no
+    lda LINEBUF+4,x
+    cmp #'W'
+    bne @no
+    lda LINEBUF+5,x
+    cmp #'D'
+    bne @no
+    lda LINEBUF+6,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
+; ------------------------------------------------------------
+; is_theme
+; Matches command: THEME
+; ------------------------------------------------------------
+is_theme:
+    lda LINEBUF,x
+    cmp #'T'
+    bne @no
+    lda LINEBUF+1,x
+    cmp #'H'
+    bne @no
+    lda LINEBUF+2,x
+    cmp #'E'
+    bne @no
+    lda LINEBUF+3,x
+    cmp #'M'
+    bne @no
+    lda LINEBUF+4,x
+    cmp #'E'
+    bne @no
+    lda LINEBUF+5,x
+    beq @yes
+    cmp #$20
+    bne @no
+@yes:
+    sec
+    rts
+@no:
+    clc
+    rts
+
 ; ============================================================
 ; COMMAND HANDLERS (cmd_*)
 ; ============================================================
+
+; ------------------------------------------------------------
+; cmd_theme
+; THEME [NORMAL|DARK|GREEN]
+;
+; No argument  → print current theme + usage
+; Valid name    → set theme_mode, call apply_theme, confirm
+; Invalid name → print usage
+; ------------------------------------------------------------
+cmd_theme:
+    lda #13
+    jsr CHROUT
+
+    ; skip past "THEME" (5 chars)
+    txa
+    clc
+    adc #5
+    tax
+
+    ; skip spaces
+@skip_sp:
+    lda LINEBUF,x
+    bne @chk_sp
+    jmp @show_current       ; no argument — show current theme
+@chk_sp:
+    cmp #$20
+    bne @got_arg
+    inx
+    bne @skip_sp
+
+@got_arg:
+    ; --- check for "NORMAL" ---
+    lda LINEBUF,x
+    cmp #'N'
+    bne @try_dark
+    lda LINEBUF+1,x
+    cmp #'O'
+    bne @bad
+    lda LINEBUF+2,x
+    cmp #'R'
+    bne @bad
+    lda LINEBUF+3,x
+    cmp #'M'
+    bne @bad
+    lda LINEBUF+4,x
+    cmp #'A'
+    bne @bad
+    lda LINEBUF+5,x
+    cmp #'L'
+    bne @bad
+    lda #0
+    sta theme_mode
+    jsr apply_theme
+    jmp @confirm
+
+@try_dark:
+    cmp #'D'
+    bne @try_green
+    lda LINEBUF+1,x
+    cmp #'A'
+    bne @bad
+    lda LINEBUF+2,x
+    cmp #'R'
+    bne @bad
+    lda LINEBUF+3,x
+    cmp #'K'
+    bne @bad
+    lda #1
+    sta theme_mode
+    jsr apply_theme
+    jmp @confirm
+
+@try_green:
+    cmp #'G'
+    bne @bad
+    lda LINEBUF+1,x
+    cmp #'R'
+    bne @bad
+    lda LINEBUF+2,x
+    cmp #'E'
+    bne @bad
+    lda LINEBUF+3,x
+    cmp #'E'
+    bne @bad
+    lda LINEBUF+4,x
+    cmp #'N'
+    bne @bad
+    lda #2
+    sta theme_mode
+    jsr apply_theme
+    jmp @confirm
+
+@bad:
+    ; unknown argument — show usage
+    jmp @usage
+
+@show_current:
+    ; print "CURRENT THEME: "
+    lda #<theme_cur_txt
+    sta ZPTR_LO
+    lda #>theme_cur_txt
+    sta ZPTR_HI
+    jsr print_z
+    ; print name for current mode
+    jsr theme_print_name
+    lda #13
+    jsr CHROUT
+@usage:
+    lda #<theme_usage_txt
+    sta ZPTR_LO
+    lda #>theme_usage_txt
+    sta ZPTR_HI
+    jsr print_z
+    rts
+
+@confirm:
+    ; print "THEME SET TO: "
+    lda #<theme_set_txt
+    sta ZPTR_LO
+    lda #>theme_set_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr theme_print_name
+    lda #13
+    jsr CHROUT
+    rts
+
+; ------------------------------------------------------------
+; theme_print_name — print name for current theme_mode
+; ------------------------------------------------------------
+theme_print_name:
+    lda theme_mode
+    cmp #1
+    beq @dark
+    cmp #2
+    beq @green
+    ; default NORMAL
+    lda #<theme_name_normal
+    sta ZPTR_LO
+    lda #>theme_name_normal
+    sta ZPTR_HI
+    jmp print_z
+@dark:
+    lda #<theme_name_dark
+    sta ZPTR_LO
+    lda #>theme_name_dark
+    sta ZPTR_HI
+    jmp print_z
+@green:
+    lda #<theme_name_green
+    sta ZPTR_LO
+    lda #>theme_name_green
+    sta ZPTR_HI
+    jmp print_z
+
+; ----------------------------
+; cmd_loadreu
+; ----------------------------
+cmd_loadreu:
+    jsr reu_detect
+    bcs loadreu_have_reu
+    jmp loadreu_no_reu
+loadreu_have_reu:
+
+    ; --- load metadata ---
+    ; Clear metadata buffer first so stale data doesn't fool the check
+    lda #0
+    sta reu_metadata+0
+    sta reu_metadata+1
+    sta reu_metadata+2
+    sta reu_metadata+3
+
+    lda #<reu_metadata
+    sta REU_C64_LO
+    lda #>reu_metadata
+    sta REU_C64_HI
+    lda #0
+    sta REU_REU_LO
+    sta REU_REU_MID
+    sta REU_REU_HI
+    lda #4
+    sta REU_LEN_LO
+    lda #0
+    sta REU_LEN_HI
+    jsr reu_reu_to_c64
+
+    lda reu_metadata
+    cmp #$C6
+    beq @meta_ok
+    jmp loadreu_bad
+@meta_ok:
+
+    lda reu_metadata+1
+    cmp #DIR_MAX
+    bcc loadreu_dir_ok
+    lda #DIR_MAX
+loadreu_dir_ok:
+    sta DIR_COUNT
+
+    lda reu_metadata+2
+    sta fs_heap_lo
+    lda reu_metadata+3
+    sta fs_heap_hi
+
+    ; --- load directory ---
+    lda #<DIR_TABLE
+    sta REU_C64_LO
+    lda #>DIR_TABLE
+    sta REU_C64_HI
+    lda #$04
+    sta REU_REU_LO
+    lda #0
+    sta REU_REU_MID
+    sta REU_REU_HI
+    lda #<(DIR_MAX*DIR_ENTRY_SIZE)
+    sta REU_LEN_LO
+    lda #>(DIR_MAX*DIR_ENTRY_SIZE)
+    sta REU_LEN_HI
+    jsr reu_reu_to_c64
+
+    ; --- heap size ---
+    sec
+    lda fs_heap_lo
+    sbc #<FS_HEAP_BASE
+    sta REU_LEN_LO
+    lda fs_heap_hi
+    sbc #>FS_HEAP_BASE
+    sta REU_LEN_HI
+    bcs @heap_size_ok
+    jmp loadreu_bad
+@heap_size_ok:
+
+    lda REU_LEN_LO
+    ora REU_LEN_HI
+    bne @load_heap
+    jmp loadreu_ok
+@load_heap:
+
+    ; --- load heap ---
+    lda #<FS_HEAP_BASE
+    sta REU_C64_LO
+    lda #>FS_HEAP_BASE
+    sta REU_C64_HI
+    lda #0
+    sta REU_REU_LO
+    lda #1
+    sta REU_REU_MID
+    lda #0
+    sta REU_REU_HI
+    jsr reu_reu_to_c64
+
+loadreu_ok:
+    lda #<loadreu_ok_txt
+    sta ZPTR_LO
+    lda #>loadreu_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+loadreu_bad:
+    lda #<loadreu_bad_txt
+    sta ZPTR_LO
+    lda #>loadreu_bad_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+loadreu_no_reu:
+    lda #<reu_notfound_txt
+    sta ZPTR_LO
+    lda #>reu_notfound_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+; ----------------------------
+; cmd_savereu
+; Saves metadata + directory + heap to REU
+; Layout in REU:
+;   $0000..$0003  metadata (4 bytes)
+;   $0004..       DIR_TABLE (DIR_MAX*DIR_ENTRY_SIZE bytes)
+;   $0100..       heap contents (fs_heap - FS_HEAP_BASE bytes)
+; ----------------------------
+cmd_savereu:
+    jsr reu_detect
+    bcs savereu_have_reu
+    jmp savereu_no_reu
+
+savereu_have_reu:
+
+    ; ----------------------------
+    ; Build metadata
+    ; ----------------------------
+    lda #$C6
+    sta reu_metadata+0
+
+    lda DIR_COUNT
+    sta reu_metadata+1
+
+    lda fs_heap_lo
+    sta reu_metadata+2
+
+    lda fs_heap_hi
+    sta reu_metadata+3
+
+
+    ; =========================================================
+    ; 1) WRITE METADATA to REU $0000 (4 bytes)
+    ; =========================================================
+    lda #$1F
+    sta REU_IMASK
+    lda #$3F
+    sta REU_ADDRCTL
+    lda REU_STATUS          ; clear/ack status flags
+
+    lda #<reu_metadata
+    sta REU_C64_LO
+    lda #>reu_metadata
+    sta REU_C64_HI
+
+    lda #$00
+    sta REU_REU_LO
+    sta REU_REU_MID
+    sta REU_REU_HI
+
+    lda #4
+    sta REU_LEN_LO
+    lda #0
+    sta REU_LEN_HI
+
+    jsr reu_c64_to_reu
+
+
+    ; ----------------------------
+    ; VERIFY: read back metadata
+    ; ----------------------------
+    lda #$1F
+    sta REU_IMASK
+    lda #$3F
+    sta REU_ADDRCTL
+    lda REU_STATUS
+
+    lda #<reu_metadata_chk
+    sta REU_C64_LO
+    lda #>reu_metadata_chk
+    sta REU_C64_HI
+
+    lda #$00
+    sta REU_REU_LO
+    sta REU_REU_MID
+    sta REU_REU_HI
+
+    lda #4
+    sta REU_LEN_LO
+    lda #0
+    sta REU_LEN_HI
+
+    jsr reu_reu_to_c64
+
+    ; If magic didn't come back, treat as failure (save didn't stick)
+    lda reu_metadata_chk+0
+    cmp #$C6
+    beq @verify_ok
+    jmp savereu_failed
+@verify_ok:
+
+
+    ; =========================================================
+    ; 2) WRITE DIRECTORY TABLE to REU $0004
+    ; =========================================================
+    lda #$1F
+    sta REU_IMASK
+    lda #$3F
+    sta REU_ADDRCTL
+    lda REU_STATUS
+
+    lda #<DIR_TABLE
+    sta REU_C64_LO
+    lda #>DIR_TABLE
+    sta REU_C64_HI
+
+    lda #$04
+    sta REU_REU_LO
+    lda #$00
+    sta REU_REU_MID
+    sta REU_REU_HI
+
+    lda #<(DIR_MAX*DIR_ENTRY_SIZE)
+    sta REU_LEN_LO
+    lda #>(DIR_MAX*DIR_ENTRY_SIZE)
+    sta REU_LEN_HI
+
+    ; SAFETY: never allow LEN=$0000 (would mean 64K on real REU)
+    lda REU_LEN_LO
+    ora REU_LEN_HI
+    beq savereu_dir_done
+
+    jsr reu_c64_to_reu
+
+savereu_dir_done:
+
+
+    ; =========================================================
+    ; 3) WRITE HEAP to REU $0100
+    ; heap_len = fs_heap - FS_HEAP_BASE
+    ; =========================================================
+    sec
+    lda fs_heap_lo
+    sbc #<FS_HEAP_BASE
+    sta REU_LEN_LO
+    lda fs_heap_hi
+    sbc #>FS_HEAP_BASE
+    sta REU_LEN_HI
+
+    ; If underflow, metadata/fs_heap is bad → fail safe
+    bcs @heap_calc_ok
+    jmp savereu_failed
+@heap_calc_ok:
+
+    ; If heap len == 0, nothing to write (still a successful save)
+    lda REU_LEN_LO
+    ora REU_LEN_HI
+    bne @write_heap
+    jmp savereu_ok
+@write_heap:
+
+    lda #$1F
+    sta REU_IMASK
+    lda #$3F
+    sta REU_ADDRCTL
+    lda REU_STATUS
+
+    lda #<FS_HEAP_BASE
+    sta REU_C64_LO
+    lda #>FS_HEAP_BASE
+    sta REU_C64_HI
+
+    lda #$00
+    sta REU_REU_LO
+    lda #$01
+    sta REU_REU_MID
+    lda #$00
+    sta REU_REU_HI
+
+    jsr reu_c64_to_reu
+
+
+    ; =========================================================
+    ; SUCCESS MESSAGE
+    ; =========================================================
+savereu_ok:
+    lda #<savereu_ok_txt
+    sta ZPTR_LO
+    lda #>savereu_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+
+    ; =========================================================
+    ; FAILURE MESSAGE
+    ; =========================================================
+savereu_failed:
+    ; You can re-use an existing error string if you want.
+    ; If you don't have one, define savereu_fail_txt.
+    lda #<savereu_fail_txt
+    sta ZPTR_LO
+    lda #>savereu_fail_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+
+    ; =========================================================
+    ; NO REU MESSAGE
+    ; =========================================================
+savereu_no_reu:
+    lda #<reu_notfound_txt
+    sta ZPTR_LO
+    lda #>reu_notfound_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+; ----------------------------
+; cmd_wipereu
+; Wipes REU by clearing metadata (invalidates REU image)
+; ----------------------------
+cmd_wipereu:
+    jsr reu_detect
+    bcs wipereu_have_reu
+    jmp wipereu_no_reu
+wipereu_have_reu:
+
+    ; Clear metadata (4 bytes at $00000)
+    lda #0
+    sta reu_metadata+0
+    sta reu_metadata+1
+    sta reu_metadata+2
+    sta reu_metadata+3
+
+    lda #<reu_metadata
+    sta REU_C64_LO
+    lda #>reu_metadata
+    sta REU_C64_HI
+    lda #0
+    sta REU_REU_LO
+    sta REU_REU_MID
+    sta REU_REU_HI
+    lda #4
+    sta REU_LEN_LO
+    lda #0
+    sta REU_LEN_HI
+    jsr reu_c64_to_reu
+
+    ; Print success message
+    lda #<wipereu_ok_txt
+    sta ZPTR_LO
+    lda #>wipereu_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+wipereu_no_reu:
+    lda #<reu_notfound_txt
+    sta ZPTR_LO
+    lda #>reu_notfound_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
 
 ; ----------------------------------------
 ; STAT <NAME>
@@ -1939,26 +4022,52 @@ rm_fill:
     bne rm_fill
 
     ; copy token into NAMEBUF (up to 8 chars)
+    ; also check for wildcard '*'
     ldy #0
+    sty rm_wildcard_len     ; will store prefix length if wildcard found
 rm_copy:
     lda LINEBUF,x
-    beq rm_search
+    beq rm_check_wildcard
     cmp #$20
-    beq rm_search
+    beq rm_check_wildcard
+    cmp #'*'                ; wildcard?
+    beq rm_found_wildcard
     sta NAMEBUF,y
     iny
     inx
     cpy #DIR_NAME_LEN
     bne rm_copy
+    jmp rm_skip_long
+
+rm_found_wildcard:
+    ; Y holds the prefix length
+    sty rm_wildcard_len
+    ; pad rest of NAMEBUF with spaces
+    cpy #DIR_NAME_LEN
+    beq rm_check_wildcard
+rm_pad_wildcard:
+    lda #' '
+    sta NAMEBUF,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne rm_pad_wildcard
+    jmp rm_check_wildcard
 
     ; if token >8, skip remainder of token
 rm_skip_long:
     lda LINEBUF,x
-    beq rm_search
+    beq rm_check_wildcard
     cmp #$20
-    beq rm_search
+    beq rm_check_wildcard
+    cmp #'*'
+    beq rm_found_wildcard
     inx
     bne rm_skip_long
+
+rm_check_wildcard:
+    lda rm_wildcard_len
+    beq rm_search           ; no wildcard, do normal search
+    jmp rm_wildcard_delete  ; wildcard mode
 
 rm_search:
     lda DIR_COUNT
@@ -2117,11 +4226,181 @@ rm_nc:
 rm_no_more:
     jmp rm_notfound
 
+; Wildcard delete - delete all files matching prefix in NAMEBUF
+rm_wildcard_delete:
+    lda #0
+    sta rm_deleted_count
+
+rm_wild_restart:
+    ; Check if any files left
+    lda DIR_COUNT
+    bne @has_files
+    jmp rm_wild_done
+@has_files:
+
+    ; DPTR = DIR_TABLE
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+
+    ldx DIR_COUNT
+
+rm_wild_entry:
+    ; Compare prefix (rm_wildcard_len bytes)
+    ldy #0
+rm_wild_cmp:
+    cpy rm_wildcard_len
+    beq rm_wild_match       ; matched all prefix chars
+    lda (DPTR_LO),y
+    cmp NAMEBUF,y
+    beq @cmp_ok
+    jmp rm_wild_next
+@cmp_ok:
+    iny
+    jmp rm_wild_cmp
+
+rm_wild_match:
+    ; Found a match! Delete this entry
+    ; entries_after = X-1
+    dex
+    stx rm_after_count
+
+    ; if no entries after, just shrink
+    lda rm_after_count
+    beq rm_wild_shrink_only
+
+    ; Calculate move_count
+    lda #0
+    sta rm_move_lo
+    sta rm_move_hi
+    lda rm_after_count
+    sta rm_tmp
+
+rm_wild_mul:
+    clc
+    lda rm_move_lo
+    adc #DIR_ENTRY_SIZE
+    sta rm_move_lo
+    bcc rm_wild_mul_nc
+    inc rm_move_hi
+rm_wild_mul_nc:
+    dec rm_tmp
+    bne rm_wild_mul
+
+    ; SRC = DPTR + DIR_ENTRY_SIZE
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta PTR_LO
+    lda DPTR_HI
+    adc #0
+    sta PTR_HI
+
+    ; Copy move_count bytes
+rm_wild_copy:
+    ldy #0
+    lda (PTR_LO),y
+    sta (DPTR_LO),y
+    inc PTR_LO
+    bne rm_wild_src_ok
+    inc PTR_HI
+rm_wild_src_ok:
+    inc DPTR_LO
+    bne rm_wild_dst_ok
+    inc DPTR_HI
+rm_wild_dst_ok:
+    lda rm_move_lo
+    bne rm_wild_dec_lo
+    dec rm_move_hi
+rm_wild_dec_lo:
+    dec rm_move_lo
+    lda rm_move_lo
+    ora rm_move_hi
+    bne rm_wild_copy
+
+rm_wild_shrink_only:
+    ; DIR_COUNT--
+    dec DIR_COUNT
+
+    ; Clear last slot
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+    ldy DIR_COUNT
+rm_wild_adv:
+    cpy #0
+    beq rm_wild_clear
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc rm_wild_adv_nc
+    inc DPTR_HI
+rm_wild_adv_nc:
+    dey
+    jmp rm_wild_adv
+
+rm_wild_clear:
+    ldy #0
+rm_wild_clr:
+    lda #0
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_ENTRY_SIZE
+    bne rm_wild_clr
+
+    ; Increment deleted count
+    inc rm_deleted_count
+
+    ; Restart search from beginning
+    jmp rm_wild_restart
+
+rm_wild_next:
+    ; Advance to next entry
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc rm_wild_nc
+    inc DPTR_HI
+rm_wild_nc:
+    dex
+    beq rm_wild_done
+    jmp rm_wild_entry
+
+rm_wild_done:
+    ; Print result
+    lda rm_deleted_count
+    beq rm_wild_none
+    ; Print "X FILES DELETED"
+    lda rm_deleted_count
+    jsr print_hex
+    lda #' '
+    jsr CHROUT
+    ldx #0
+rm_wild_msg:
+    lda rm_wild_ok_txt,x
+    beq rm_wild_exit
+    jsr CHROUT
+    inx
+    bne rm_wild_msg
+rm_wild_exit:
+    lda #13
+    jsr CHROUT
+    rts
+
+rm_wild_none:
+    jmp rm_notfound
+
 rm_notfound:
     ldx #0
 rm_nf:
     lda notfound_txt,x
-    beq rm_done
+    bne @cont1
+    jmp rm_done
+@cont1:
     jsr CHROUT
     inx
     bne rm_nf
@@ -2130,16 +4409,20 @@ rm_usage:
     ldx #0
 rm_us:
     lda rm_usage_txt,x
-    beq rm_done
+    bne @cont2
+    jmp rm_done
+@cont2:
     jsr CHROUT
     inx
     bne rm_us
 
 ; --- RM scratch/state ---
-rm_after_count: !byte 0
-rm_tmp:         !byte 0
-rm_move_lo:     !byte 0
-rm_move_hi:     !byte 0
+rm_after_count:   !byte 0
+rm_tmp:           !byte 0
+rm_move_lo:       !byte 0
+rm_move_hi:       !byte 0
+rm_wildcard_len:  !byte 0
+rm_deleted_count: !byte 0
 
 ; ============================================================
 ; cmd_echo
@@ -2581,7 +4864,6 @@ ls_no_carry:
 ;   - OS / shell name
 ;   - Version
 ;   - CPU / platform
-;   - Free Memory
 ;
 ; Notes:
 ;   - Static, compile-time string (no runtime detection)
@@ -2601,8 +4883,16 @@ cmd_uname:
 @done:
     lda #13
     jsr CHROUT
-    jsr print_free_mem_line
     rts
+
+; ------------------------------------------------------------
+; cmd_version
+; ------------------------------------------------------------
+; VERSION (alias: VER)
+; Reuses UNAME output so there is only one "version string".
+; ------------------------------------------------------------
+cmd_version:
+    jmp cmd_uname
 
 ; ------------------------------------------------------------
 ; cmd_whoami
@@ -2665,6 +4955,96 @@ cw_chksp:
     bne cw_skip1
 
 cw_name_start:
+    ; First, parse the filename into NAMEBUF (8 chars, space-padded)
+    ldy #0
+cw_fill_namebuf:
+    lda #' '
+    sta NAMEBUF,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne cw_fill_namebuf
+
+    ; Copy token into NAMEBUF (up to 8 chars)
+    ldy #0
+cw_copy_name:
+    lda LINEBUF,x
+    beq cw_save_x
+    cmp #$20
+    beq cw_save_x
+    sta NAMEBUF,y
+    iny
+    inx
+    cpy #DIR_NAME_LEN
+    bne cw_copy_name
+
+    ; if name >8 chars, skip rest of token
+cw_skip_name_tail:
+    lda LINEBUF,x
+    beq cw_save_x
+    cmp #$20
+    beq cw_save_x
+    inx
+    bne cw_skip_name_tail
+
+cw_save_x:
+    ; Save X position AFTER advancing past filename
+    stx cw_tmp_x
+
+    ; Check for wildcard in filename
+    ldy #0
+cw_check_wildcard:
+    lda NAMEBUF,y
+    cmp #'*'
+    bne @not_wildcard
+    jmp cw_invalid_name
+@not_wildcard:
+    iny
+    cpy #DIR_NAME_LEN
+    bne cw_check_wildcard
+
+cw_check_exists:
+    ; Now check if this filename already exists
+    lda DIR_COUNT
+    beq cw_no_duplicate  ; no files, can't be duplicate
+
+    ; Search existing files
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+    ldx DIR_COUNT
+
+cw_search_loop:
+    ; Compare 8 bytes of name
+    ldy #0
+cw_search_cmp:
+    lda (DPTR_LO),y
+    cmp NAMEBUF,y
+    bne cw_search_next
+    iny
+    cpy #DIR_NAME_LEN
+    bne cw_search_cmp
+
+    ; MATCH! File already exists - reject
+    jmp cw_exists
+
+cw_search_next:
+    ; Advance to next entry
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc cw_search_nc
+    inc DPTR_HI
+cw_search_nc:
+    dex
+    bne cw_search_loop
+
+cw_no_duplicate:
+    ; File doesn't exist, proceed with creation
+    ; Restore X to continue parsing
+    ldx cw_tmp_x
+
     ; if no room in directory
     lda DIR_COUNT
     cmp #DIR_MAX
@@ -2704,39 +5084,24 @@ cw_clr_entry:
     cpy #DIR_ENTRY_SIZE
     bne cw_clr_entry
 
-    ; write NAME into entry (8 bytes, pad with spaces)
+    ; write NAMEBUF into entry (already parsed)
     ldy #0
-
-cw_name_loop:
-    lda LINEBUF,x
-    beq cw_name_pad
-    cmp #$20
-    beq cw_name_pad
+cw_write_name:
+    lda NAMEBUF,y
     sta (DPTR_LO),y
     iny
-    inx
     cpy #DIR_NAME_LEN
-    bne cw_name_loop
+    bne cw_write_name
 
-
-; if name >8 chars, skip rest of token
-cw_skip_long:
+    ; Now skip to the text part of the command
+    ; X still points past the filename
+cw_skip_to_text:
     lda LINEBUF,x
     beq cw_after_name
     cmp #$20
-    beq cw_after_name
+    bne cw_after_name
     inx
-    bne cw_skip_long
-
-cw_name_pad:
-    lda #' '
-
-cw_pad_loop:
-    cpy #DIR_NAME_LEN
-    beq cw_after_name
-    sta (DPTR_LO),y
-    iny
-    bne cw_pad_loop
+    bne cw_skip_to_text
 
 cw_after_name:
 
@@ -2866,6 +5231,28 @@ cw_full_loop:
 cw_full_end:
     jmp cw_done
 
+cw_exists:
+    ldx #0
+cw_exists_loop:
+    lda file_exists_txt,x
+    beq cw_exists_end
+    jsr CHROUT
+    inx
+    bne cw_exists_loop
+cw_exists_end:
+    jmp cw_done
+
+cw_invalid_name:
+    ldx #0
+cw_invalid_loop:
+    lda invalid_filename_txt,x
+    beq cw_invalid_end
+    jsr CHROUT
+    inx
+    bne cw_invalid_loop
+cw_invalid_end:
+    jmp cw_done
+
 cw_usage:
     ldx #0
 
@@ -2878,33 +5265,6 @@ cw_usage_loop:
 
 cw_usage_end:
     jmp cw_done
-
-is_clear:
-    lda LINEBUF,x
-    cmp #'C'
-    bne @no
-    lda LINEBUF+1,x
-    cmp #'L'
-    bne @no
-    lda LINEBUF+2,x
-    cmp #'E'
-    bne @no
-    lda LINEBUF+3,x
-    cmp #'A'
-    bne @no
-    lda LINEBUF+4,x
-    cmp #'R'
-    bne @no
-    lda LINEBUF+5,x
-    beq @yes
-    cmp #$20      ; space
-    bne @no
-@yes:
-    sec
-    rts
-@no:
-    clc
-    rts
 
 ; ------------------------------------------------------------
 ; cmd_help
@@ -2926,9 +5286,30 @@ cmd_help:
     lda #13
     jsr CHROUT
 
-    lda #<help_txt
+    ; Print first part of help
+    lda #<help_txt_part1
     sta ZPTR_LO
-    lda #>help_txt
+    lda #>help_txt_part1
+    sta ZPTR_HI
+    jsr print_z
+
+    ; Print "press space" message
+    lda #<help_more_txt
+    sta ZPTR_LO
+    lda #>help_more_txt
+    sta ZPTR_HI
+    jsr print_z
+
+    ; Wait for any key
+@wait:
+    jsr CHRIN
+    cmp #0
+    beq @wait
+
+    ; Print second part of help
+    lda #<help_txt_part2
+    sta ZPTR_LO
+    lda #>help_txt_part2
     sta ZPTR_HI
     jsr print_z
 
@@ -2945,7 +5326,7 @@ cmd_date:
     lda #13
     jsr CHROUT
 
-    jsr update_day_rollover
+    jsr update_day_rollover      ; <-- ADD THIS
 
     lda #<DATE_STR
     sta ZPTR_LO
@@ -2967,7 +5348,7 @@ cmd_time:
     lda #13
     jsr CHROUT
 
-    jsr update_day_rollover
+    jsr update_day_rollover      ; <-- ADD THIS
 
     ; You can reuse the jlo/jmid/jhi that update_day_rollover already read,
     ; but keeping your existing calls is fine.
@@ -2985,6 +5366,133 @@ cmd_time:
     jsr CHROUT
     lda s_out
     jsr print_2d
+
+    lda #13
+    jsr CHROUT
+    rts
+
+; ------------------------------------------------------------
+; cmd_uptime
+; UPTIME
+; Prints time since boot: [<DAYS> DAYS ]HH:MM:SS
+; ------------------------------------------------------------
+cmd_uptime:
+    lda #13
+    jsr CHROUT
+
+    ; Update rollover tracking (also increments DATE + UP_DAYS)
+    jsr update_day_rollover
+
+    ; Get current seconds since midnight -> sec_lo/sec_hi
+    jsr read_clock_to_jiffies
+    jsr jiffies_to_seconds16
+
+    ; delta = current_sec - boot_sec  (16-bit)
+    sec
+    lda sec_lo
+    sbc BOOT_SEC_LO
+    sta work_lo
+    lda sec_hi
+    sbc BOOT_SEC_HI
+    sta work_hi
+
+    ; If borrow happened, then we crossed midnight relative to boot baseline.
+    ; In that case: delta += 86400 and days-- (because UP_DAYS counted midnight rollovers,
+    ; but boot baseline is not midnight).
+    bcs @delta_ok
+
+    ; delta += 86400 (0x15180) => add $80 to lo, $51 to hi, plus carry
+    clc
+    lda work_lo
+    adc #$80
+    sta work_lo
+    lda work_hi
+    adc #$51
+    sta work_hi
+
+    ; days--
+    lda UP_DAYS_LO
+    bne @dec_lo
+    dec UP_DAYS_HI
+@dec_lo:
+    dec UP_DAYS_LO
+
+@delta_ok:
+    ; If days != 0, print "<days> DAYS "
+    lda UP_DAYS_LO
+    ora UP_DAYS_HI
+    beq @print_hms
+
+    lda UP_DAYS_HI
+    ldx UP_DAYS_LO
+    jsr print_u16_dec
+
+    lda #' '
+    jsr CHROUT
+    lda #'D'
+    jsr CHROUT
+    lda #'A'
+    jsr CHROUT
+    lda #'Y'
+    jsr CHROUT
+    lda #'S'
+    jsr CHROUT
+    lda #' '
+    jsr CHROUT
+
+@print_hms:
+    ; Convert delta seconds (work_lo/work_hi) to HMS
+    lda work_lo
+    sta sec_lo
+    lda work_hi
+    sta sec_hi
+    jsr seconds16_to_hms
+
+    lda h_out
+    jsr print_2d
+    lda #':'
+    jsr CHROUT
+    lda m_out
+    jsr print_2d
+    lda #':'
+    jsr CHROUT
+    lda s_out
+    jsr print_2d
+
+    lda #13
+    jsr CHROUT
+    rts
+
+; ------------------------------------------------------------
+; cmd_pwd
+; ------------------------------------------------------------
+; PWD
+; Prints a Unix-like "current directory" path:
+;   /home/<username>
+;
+; Notes:
+;   - Uses USERNAME (0-terminated)
+;   - No real directory support yet; this is a friendly convention
+; Clobbers: A, X
+; ------------------------------------------------------------
+cmd_pwd:
+    lda #13
+    jsr CHROUT
+
+    ldx #0
+@p:
+    lda pwd_prefix_txt,x
+    beq @after_prefix
+    jsr CHROUT
+    inx
+    bne @p
+
+@after_prefix:
+    lda #<USERNAME
+    sta ZPTR_LO
+    lda #>USERNAME
+    sta ZPTR_HI
+    jsr print_z
 
     lda #13
     jsr CHROUT
@@ -3012,6 +5520,2496 @@ cmd_exit:
     jmp $A474         ; BASIC warm start
 
 ; ------------------------------------------------------------
+; DOS <cmd...>
+; Sends <cmd...> to device 8 command channel (15)
+; Then prints the DOS status line returned by the drive.
+;
+; Special shortcut:
+;   DOS @$      -> directory listing (calls cmd_dir)
+;
+; Examples:
+;   DOS I0
+;   DOS S:FILE
+;   DOS R:NEW=OLD
+;   DOS @$
+; ------------------------------------------------------------
+cmd_dos:
+    lda #13
+    jsr CHROUT
+
+    ; advance X past "DOS"
+    txa
+    clc
+    adc #3
+    tax
+
+@skip:
+    lda LINEBUF,x
+    beq @usage_jmp
+    cmp #$20
+    bne @cmd_start
+    inx
+    bne @skip
+
+@usage_jmp:
+    jmp @usage
+
+@cmd_start:
+    ; --------------------------------------------------------
+    ; DOS @$ shortcut (directory)
+    ; Accept "@$" followed by EOL or space
+    ; --------------------------------------------------------
+    lda LINEBUF,x
+    cmp #'@'
+    bne @normal_dos
+    lda LINEBUF+1,x
+    cmp #'$'
+    bne @normal_dos
+    lda LINEBUF+2,x
+    beq @do_dir
+    cmp #$20
+    beq @do_dir
+    ; "@$something" -> treat as normal DOS cmd
+    jmp @normal_dos
+
+@do_dir:
+    jsr cmd_dir
+    jsr CLRCHN
+    rts
+
+@normal_dos:
+    stx dos_idx
+
+    ; ZPTR = LINEBUF + dos_idx
+    lda #<LINEBUF
+    clc
+    adc dos_idx
+    sta ZPTR_LO
+    lda #>LINEBUF
+    adc #0
+    sta ZPTR_HI
+
+    ; compute length into Y (scan until 0)
+    ldx dos_idx
+    ldy #0
+@len:
+    lda LINEBUF,x
+    beq @have_len
+    inx
+    iny
+    bne @len
+
+@have_len:
+    tya
+    beq @usage
+    sta dos_len
+
+    ; SETNAM(len=A, ptr in X/Y)
+    lda dos_len
+    ldx ZPTR_LO
+    ldy ZPTR_HI
+    jsr SETNAM
+
+    ; SETLFS(LA=15, DEV=default, SA=15)
+    lda #15
+    ldx default_drive
+    ldy #15
+    jsr SETLFS
+
+    ; Send command to drive (OPEN command channel)
+    jsr OPEN
+    jsr READST
+    bne @open_fail
+
+    ; Close command channel and restore I/O
+    lda #15
+    jsr CLOSE
+    jsr CLRCHN
+
+    ; Print prefix then read/print status line
+    lda #<dos_status_txt
+    sta ZPTR_LO
+    lda #>dos_status_txt
+    sta ZPTR_HI
+    jsr print_z
+
+    jsr print_drive_status
+    rts
+
+@open_fail:
+    jsr CLRCHN
+    lda #<dos_openfail_txt
+    sta ZPTR_LO
+    lda #>dos_openfail_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+@usage:
+    lda #<dos_usage_txt
+    sta ZPTR_LO
+    lda #>dos_usage_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+dos_idx: !byte 0
+dos_len: !byte 0
+
+; ------------------------------------------------------------
+; cmd_dir
+; DIR (via DOS @$)
+; Opens "$" on device 8 and prints directory entries.
+; Safe: breaks on link=0 OR EOI.
+; ------------------------------------------------------------
+cmd_dir:
+    lda #13
+    jsr CHROUT
+
+    jsr CLRCHN            ; IMPORTANT: reset any prior CHKIN/CHKOUT
+
+    ; SETNAM "$" (length=1)
+    lda #1
+    ldx #<dir_name_txt
+    ldy #>dir_name_txt
+    jsr SETNAM
+
+    ; SETLFS(LA=2, DEV=default, SA=0)  SA=0 = directory stream
+    lda #2
+    ldx default_drive
+    ldy #0
+    jsr SETLFS
+
+    jsr OPEN
+    jsr READST
+    bne dir_open_fail
+
+    ; CHKIN expects logical file # in X
+    ldx #2
+    jsr CHKIN
+    jsr READST
+    bne dir_chkin_fail
+
+    ; Directory is a BASIC-style PRG stream
+    ; First two bytes = load address -> discard
+    jsr CHRIN
+    jsr CHRIN
+
+dir_nextline:
+    ; If drive says EOI, we're done
+    jsr READST
+    and #$40              ; EOI
+    bne dir_done
+
+    ; Read link pointer (2 bytes). If 0,0 then done.
+    jsr CHRIN
+    sta work_lo
+    jsr CHRIN
+    sta work_hi
+    lda work_lo
+    ora work_hi
+    beq dir_done
+
+    ; Read "line number" (2 bytes) which is actually blocks
+    jsr CHRIN
+    sta blk_lo
+    jsr CHRIN
+    sta blk_hi
+
+    ; Print blocks as decimal + space
+    lda blk_hi
+    ldx blk_lo
+    jsr print_u16_dec
+    lda #' '
+    jsr CHROUT
+
+dir_text:
+    ; If EOI mid-line, stop cleanly
+    jsr READST
+    and #$40
+    bne dir_done
+
+    jsr CHRIN
+    beq dir_eol            ; $00 ends the line text
+
+    ; Convert $A0 (shift-space padding) to normal space
+    cmp #$A0
+    bne dir_print
+    lda #$20
+dir_print:
+    jsr CHROUT
+    jmp dir_text
+
+dir_eol:
+    lda #13
+    jsr CHROUT
+    jmp dir_nextline
+
+dir_done:
+    lda #13
+    jsr CHROUT
+    jmp dir_cleanup
+
+dir_open_fail:
+    lda #<dos_openfail_txt
+    sta ZPTR_LO
+    lda #>dos_openfail_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jmp dir_cleanup
+
+dir_chkin_fail:
+    lda #<dos_nochan_txt
+    sta ZPTR_LO
+    lda #>dos_nochan_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jmp dir_cleanup
+
+dir_cleanup:
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    rts
+
+; temps (use existing scratch vars if you already have them)
+blk_lo:  !byte 0
+blk_hi:  !byte 0
+
+; ------------------------------------------------------------
+; cmd_nano
+; NANO <name>
+; Multi-line text entry. Ends when user types a single '.' line.
+;
+; Creates a RAM file in the existing FS heap.
+; Stores CR ($0D) between lines.
+; ------------------------------------------------------------
+cmd_nano:
+    lda #13
+    jsr CHROUT
+
+    ; Move X past "NANO" (4 chars)
+    txa
+    clc
+    adc #4
+    tax
+
+; --- skip spaces before name ---
+cn_skip1:
+    lda LINEBUF,x
+    bne cn_chksp
+    jmp cn_usage
+
+cn_chksp:
+    cmp #$20
+    bne cn_name_start
+    inx
+    bne cn_skip1
+
+cn_name_start:
+    ; First, copy filename into NANONAME buffer (8 chars, space-padded)
+    ldy #0
+cn_fill_nanoname:
+    lda #' '
+    sta NANONAME,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne cn_fill_nanoname
+
+    ; Copy token into NANONAME (up to 8 chars)
+    stx nano_tmp_x       ; save X for later
+    ldy #0
+cn_copy_nanoname:
+    lda LINEBUF,x
+    beq cn_search_existing
+    cmp #$20
+    beq cn_search_existing
+    sta NANONAME,y
+    iny
+    inx
+    cpy #DIR_NAME_LEN
+    bne cn_copy_nanoname
+
+    ; if name >8 chars, skip rest of token
+cn_skip_long_name:
+    lda LINEBUF,x
+    beq cn_search_existing
+    cmp #$20
+    beq cn_search_existing
+    inx
+    bne cn_skip_long_name
+
+cn_search_existing:
+    ; Now search DIR_TABLE for NANONAME
+    lda DIR_COUNT
+    beq cn_create_new    ; no files, must create new
+
+    ; Search loop
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+    ldx DIR_COUNT
+
+cn_search_loop:
+    ; Compare 8 bytes of name
+    ldy #0
+cn_search_cmp:
+    lda (DPTR_LO),y
+    cmp NANONAME,y
+    bne cn_search_next
+    iny
+    cpy #DIR_NAME_LEN
+    bne cn_search_cmp
+
+    ; MATCH! File exists - set flag and use this entry
+    lda #1
+    sta nano_existing
+    jmp cn_found_entry
+
+cn_search_next:
+    ; Advance DPTR to next entry
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc cn_search_nc
+    inc DPTR_HI
+cn_search_nc:
+    dex
+    bne cn_search_loop
+
+cn_create_new:
+    ; File doesn't exist - create new entry
+    lda #0
+    sta nano_existing
+
+    ; Check if room in directory
+    lda DIR_COUNT
+    cmp #DIR_MAX
+    bcc cn_room
+    jmp cn_full
+
+cn_room:
+    ; DPTR = DIR_TABLE + (DIR_COUNT * DIR_ENTRY_SIZE)
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+    ldy DIR_COUNT
+
+cn_adv:
+    cpy #0
+    beq cn_entry_ready
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc cn_adv_nc
+    inc DPTR_HI
+
+cn_adv_nc:
+    dey
+    jmp cn_adv
+
+cn_entry_ready:
+    ; Clear entry for new file
+    ldy #0
+cn_clr_entry:
+    lda #0
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_ENTRY_SIZE
+    bne cn_clr_entry
+
+    ; Write NANONAME into entry
+    ldy #0
+cn_write_name:
+    lda NANONAME,y
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_NAME_LEN
+    bne cn_write_name
+    jmp cn_after_name
+
+cn_found_entry:
+    ; File exists - DPTR already points to it
+    ; Read the existing file's start address and length
+    ldy #DIR_OFF_START
+    lda (DPTR_LO),y
+    sta nano_old_start_lo
+    iny
+    lda (DPTR_LO),y
+    sta nano_old_start_hi
+
+    ldy #DIR_OFF_LEN
+    lda (DPTR_LO),y
+    sta nano_old_len_lo
+    iny
+    lda (DPTR_LO),y
+    sta nano_old_len_hi
+
+    ; Display existing content
+    lda #13
+    jsr CHROUT
+    ldx #0
+@show_existing:
+    lda nano_existing_txt,x
+    beq @done_msg
+    jsr CHROUT
+    inx
+    bne @show_existing
+@done_msg:
+    lda #13
+    jsr CHROUT
+
+    ; Display the file content
+    lda nano_old_start_lo
+    sta PTR_LO
+    lda nano_old_start_hi
+    sta PTR_HI
+
+    lda nano_old_len_lo
+    sta tmp_len_lo
+    lda nano_old_len_hi
+    sta tmp_len_hi
+
+    ; Print file content byte by byte
+@print_loop:
+    lda tmp_len_lo
+    ora tmp_len_hi
+    beq @print_done
+
+    ldy #0
+    lda (PTR_LO),y
+    jsr CHROUT
+
+    inc PTR_LO
+    bne @no_carry
+    inc PTR_HI
+@no_carry:
+
+    lda tmp_len_lo
+    bne @dec_lo
+    dec tmp_len_hi
+@dec_lo:
+    dec tmp_len_lo
+    jmp @print_loop
+
+@print_done:
+    lda #13
+    jsr CHROUT
+
+    ; For editing, we'll rewrite at the same location
+    lda nano_old_start_lo
+    sta PTR_LO
+    lda nano_old_start_hi
+    sta PTR_HI
+
+    ; Reset length counter for new content
+    lda #0
+    sta tmp_len_lo
+    sta tmp_len_hi
+
+    jmp cn_editor_start
+
+cn_after_name:
+    ; New file - allocate at heap
+    ; store start = fs_heap into entry offsets 8/9
+    ldy #DIR_OFF_START
+    lda fs_heap_lo
+    sta (DPTR_LO),y
+    iny
+    lda fs_heap_hi
+    sta (DPTR_LO),y
+
+    ; PTR = fs_heap
+    lda fs_heap_lo
+    sta PTR_LO
+    lda fs_heap_hi
+    sta PTR_HI
+
+    ; len = 0
+    lda #0
+    sta tmp_len_lo
+    sta tmp_len_hi
+
+cn_editor_start:
+
+    ; print a tiny instruction line
+    lda #<nano_hdr_txt
+    sta ZPTR_LO
+    lda #>nano_hdr_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+
+; ------------------------------------------------------------
+; input loop: read lines until "." alone
+; ------------------------------------------------------------
+cn_line_loop:
+    ; show prompt for editor lines (optional)
+    lda #<nano_prompt_txt
+    sta ZPTR_LO
+    lda #>nano_prompt_txt
+    sta ZPTR_HI
+    jsr print_z
+
+    jsr read_line          ; fills LINEBUF, 0-terminated
+
+    lda #$0D
+    jsr CHROUT
+
+    ; if LINEBUF == "." and next == 0 => done
+    lda LINEBUF
+    cmp #'.'
+    bne cn_copy_line
+    lda LINEBUF+1
+    beq cn_finish
+
+cn_copy_line:
+    ; copy LINEBUF bytes into heap until 0
+    ldx #0
+
+cn_copy_ch:
+    lda LINEBUF,x
+    beq cn_end_line
+    ldy #0
+    sta (PTR_LO),y
+
+    ; PTR++
+    inc PTR_LO
+    bne cn_ptr_ok
+    inc PTR_HI
+
+cn_ptr_ok:
+    ; len++
+    inc tmp_len_lo
+    bne cn_len_ok
+    inc tmp_len_hi
+
+cn_len_ok:
+    inx
+    bne cn_copy_ch
+
+cn_end_line:
+    ; append CR ($0D) to separate lines
+    lda #$0D
+    ldy #0
+    sta (PTR_LO),y
+    inc PTR_LO
+    bne cn_ptr_ok2
+    inc PTR_HI
+
+cn_ptr_ok2:
+    inc tmp_len_lo
+    bne cn_len_ok2
+    inc tmp_len_hi
+
+cn_len_ok2:
+    jmp cn_line_loop
+
+cn_finish:
+    ; store len into entry offsets 10/11
+    ldy #DIR_OFF_LEN
+    lda tmp_len_lo
+    sta (DPTR_LO),y
+    iny
+    lda tmp_len_hi
+    sta (DPTR_LO),y
+
+    jsr fs_stamp_entry_datetime
+
+    ; Update heap pointer
+    ; For new files: always update heap to PTR
+    ; For existing files: only update if PTR > old_end
+    lda nano_existing
+    beq cn_update_heap      ; new file, always update
+
+    ; Existing file: calculate old_end = old_start + old_len
+    clc
+    lda nano_old_start_lo
+    adc nano_old_len_lo
+    sta nano_tmp_lo
+    lda nano_old_start_hi
+    adc nano_old_len_hi
+    sta nano_tmp_hi
+
+    ; Compare PTR with old_end
+    ; If PTR > old_end, update heap to PTR
+    ; If PTR <= old_end, keep heap as is (we wrote within old space)
+    lda PTR_HI
+    cmp nano_tmp_hi
+    bcc cn_skip_heap_update   ; PTR_HI < old_end_hi
+    bne cn_update_heap        ; PTR_HI > old_end_hi
+    lda PTR_LO
+    cmp nano_tmp_lo
+    bcc cn_skip_heap_update   ; PTR_LO < old_end_lo
+    beq cn_skip_heap_update   ; PTR_LO == old_end_lo
+
+cn_update_heap:
+    ; commit heap pointer = PTR
+    lda PTR_LO
+    sta fs_heap_lo
+    lda PTR_HI
+    sta fs_heap_hi
+
+cn_skip_heap_update:
+    ; Only increment DIR_COUNT if this was a new file
+    lda nano_existing
+    bne cn_skip_count_inc
+    inc DIR_COUNT
+
+cn_skip_count_inc:
+    lda #<nano_done_txt
+    sta ZPTR_LO
+    lda #>nano_done_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+cn_usage:
+    lda #<nano_usage_txt
+    sta ZPTR_LO
+    lda #>nano_usage_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+cn_full:
+    lda #<full_txt
+    sta ZPTR_LO
+    lda #>full_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+; ============================================================
+; SAVE / LOAD COMMANDS (DISK BRIDGE)
+; ============================================================
+
+; ------------------------------------------------------------
+; cmd_drive
+; DRIVE [8|9|10|11]
+;
+; Sets or displays the default drive number.
+; If no argument, shows current drive.
+; If argument, sets default drive (8, 9, 10, or 11).
+; ------------------------------------------------------------
+cmd_drive:
+    lda #13
+    jsr CHROUT
+
+    ; Move X past "DRIVE" (5 chars)
+    txa
+    clc
+    adc #5
+    tax
+
+    ; Skip spaces
+drive_skip_sp:
+    lda LINEBUF,x
+    bne @not_empty
+    jmp drive_show       ; no argument, just show current
+@not_empty:
+    cmp #$20
+    bne drive_check_num
+    inx
+    jmp drive_skip_sp
+
+drive_check_num:
+    ; Check for '8', '9', or '1' (for 10/11)
+    cmp #'8'
+    beq drive_set_8
+    cmp #'9'
+    beq drive_set_9
+    cmp #'1'
+    beq drive_try_10_11
+    jmp drive_usage
+
+drive_set_8:
+    ; Make sure next char is space or EOL
+    lda LINEBUF+1,x
+    beq drive_do_8
+    cmp #$20
+    beq drive_do_8
+    jmp drive_usage
+drive_do_8:
+    lda #8
+    sta default_drive
+    jmp drive_confirm
+
+drive_set_9:
+    ; Make sure next char is space or EOL
+    lda LINEBUF+1,x
+    beq drive_do_9
+    cmp #$20
+    beq drive_do_9
+    jmp drive_usage
+drive_do_9:
+    lda #9
+    sta default_drive
+    jmp drive_confirm
+
+drive_try_10_11:
+    ; Could be '10' or '11'
+    lda LINEBUF+1,x
+    cmp #'0'
+    beq drive_set_10
+    cmp #'1'
+    beq drive_set_11
+    jmp drive_usage
+
+drive_set_10:
+    ; Make sure next char is space or EOL
+    lda LINEBUF+2,x
+    beq drive_do_10
+    cmp #$20
+    beq drive_do_10
+    jmp drive_usage
+drive_do_10:
+    lda #10
+    sta default_drive
+    jmp drive_confirm
+
+drive_set_11:
+    ; Make sure next char is space or EOL
+    lda LINEBUF+2,x
+    beq drive_do_11
+    cmp #$20
+    beq drive_do_11
+    jmp drive_usage
+drive_do_11:
+    lda #11
+    sta default_drive
+    jmp drive_confirm
+
+drive_confirm:
+    ; Print confirmation
+    lda #<drive_set_txt
+    sta ZPTR_LO
+    lda #>drive_set_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda default_drive
+    jsr print_drive_num
+    lda #13
+    jsr CHROUT
+    rts
+
+drive_show:
+    ; Show current default drive
+    lda #<drive_current_txt
+    sta ZPTR_LO
+    lda #>drive_current_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda default_drive
+    jsr print_drive_num
+    lda #13
+    jsr CHROUT
+    rts
+
+; Helper to print drive number (8, 9, 10, or 11)
+print_drive_num:
+    cmp #10
+    bcs @two_digit
+    ; Single digit (8 or 9)
+    clc
+    adc #'0'
+    jsr CHROUT
+    rts
+@two_digit:
+    ; Print '1' then the second digit
+    lda #'1'
+    jsr CHROUT
+    lda default_drive
+    sec
+    sbc #10
+    clc
+    adc #'0'
+    jsr CHROUT
+    rts
+
+drive_usage:
+    lda #<drive_usage_txt
+    sta ZPTR_LO
+    lda #>drive_usage_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+; ------------------------------------------------------------
+; cmd_save
+; SAVE <filename>
+;
+; Saves a file from RAM filesystem to disk (device 8) as SEQ.
+;
+; Operation:
+;   1. Parse filename from LINEBUF
+;   2. Find file in RAM filesystem
+;   3. Open SEQ file for write on device 8 (SA=1)
+;   4. Stream bytes from RAM heap to disk
+;   5. Close file and check status
+;
+; Error handling:
+;   - File not found in RAM
+;   - Disk error (no drive, disk full, etc.)
+; ------------------------------------------------------------
+cmd_save:
+    lda #13
+    jsr CHROUT
+
+    ; Move X past "SAVE" (4 chars)
+    txa
+    clc
+    adc #4
+    tax
+
+; --- Skip spaces before filename ---
+save_skip1:
+    lda LINEBUF,x
+    bne save_chksp
+    jmp save_usage
+
+save_chksp:
+    cmp #$20
+    bne save_check_drive
+    inx
+    bne save_skip1
+
+; --- Check for drive number (8:, 9:, 10:, 11:) ---
+save_check_drive:
+    ; Use global default drive
+    lda default_drive
+    sta save_drive_num
+
+    ; Check if digit
+    lda LINEBUF,x
+    cmp #'8'
+    beq save_try_8
+    cmp #'9'
+    beq save_try_9
+    cmp #'1'
+    beq save_try_10_11
+    jmp save_name_start    ; Not a drive spec
+
+save_try_8:
+    ; Check for '8:'
+    lda LINEBUF+1,x
+    cmp #':'
+    bne save_name_start
+    lda #8
+    sta save_drive_num
+    inx
+    inx
+    jmp save_name_start
+
+save_try_9:
+    ; Check for '9:'
+    lda LINEBUF+1,x
+    cmp #':'
+    bne save_name_start
+    lda #9
+    sta save_drive_num
+    inx
+    inx
+    jmp save_name_start
+
+save_try_10_11:
+    ; Could be '10:' or '11:'
+    lda LINEBUF+1,x
+    cmp #'0'
+    beq save_try_10
+    cmp #'1'
+    beq save_try_11
+    jmp save_name_start
+
+save_try_10:
+    ; Check for '10:'
+    lda LINEBUF+2,x
+    cmp #':'
+    bne save_name_start
+    lda #10
+    sta save_drive_num
+    inx
+    inx
+    inx
+    jmp save_name_start
+
+save_try_11:
+    ; Check for '11:'
+    lda LINEBUF+2,x
+    cmp #':'
+    bne save_name_start
+    lda #11
+    sta save_drive_num
+    inx
+    inx
+    inx
+    jmp save_name_start
+
+save_name_start:
+    ; Build NAMEBUF (8 chars padded with spaces)
+    ldy #0
+save_fill:
+    lda #' '
+    sta NAMEBUF,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne save_fill
+
+    ; Copy filename token into NAMEBUF
+    stx save_tmp_x       ; save X for disk filename
+    ldy #0
+save_copy:
+    lda LINEBUF,x
+    beq save_search
+    cmp #$20
+    beq save_search
+    sta NAMEBUF,y
+    iny
+    inx
+    cpy #DIR_NAME_LEN
+    bne save_copy
+
+    ; If token >8, skip remainder
+save_skip_long:
+    lda LINEBUF,x
+    beq save_search
+    cmp #$20
+    beq save_search
+    inx
+    bne save_skip_long
+
+save_search:
+    ; Search for file in RAM filesystem
+    lda DIR_COUNT
+    bne save_has_files
+    jmp save_notfound
+
+save_has_files:
+    ; DPTR = DIR_TABLE
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+
+    ldx DIR_COUNT
+
+save_entry:
+    ; Compare 8 bytes of name
+    ldy #0
+save_cmp_loop:
+    lda (DPTR_LO),y
+    cmp NAMEBUF,y
+    beq @match
+    jmp save_next_entry
+@match:
+    iny
+    cpy #DIR_NAME_LEN
+    bne save_cmp_loop
+
+    ; MATCH! Read start address and length
+    ldy #DIR_OFF_START
+    lda (DPTR_LO),y
+    sta PTR_LO
+    iny
+    lda (DPTR_LO),y
+    sta PTR_HI
+
+    ldy #DIR_OFF_LEN
+    lda (DPTR_LO),y
+    sta tmp_len_lo
+    iny
+    lda (DPTR_LO),y
+    sta tmp_len_hi
+
+    ; If length == 0, just save empty file
+    lda tmp_len_lo
+    ora tmp_len_hi
+    beq save_open_file   ; still write empty file
+
+save_open_file:
+    ; Calculate filename length (scan from save_tmp_x until space or 0)
+    ldx save_tmp_x
+    ldy #0
+save_flen:
+    lda LINEBUF,x
+    beq save_have_flen
+    cmp #$20
+    beq save_have_flen
+    inx
+    iny
+    cpy #16              ; max filename length for C64 DOS
+    bne save_flen
+
+save_have_flen:
+    tya
+    bne @ok
+    jmp save_usage       ; no filename (shouldn't happen)
+@ok:
+    ; Copy filename from LINEBUF to DOSFNAME and append ",S,W"
+    sty save_flen_tmp    ; save filename length
+    ldx save_tmp_x       ; X = start of filename in LINEBUF
+    ldy #0               ; Y = index into DOSFNAME
+save_copy_fname:
+    lda LINEBUF,x
+    sta DOSFNAME,y
+    inx
+    iny
+    cpy save_flen_tmp
+    bne save_copy_fname
+
+    ; Append ",S,W" to DOSFNAME
+    lda #','
+    sta DOSFNAME,y
+    iny
+    lda #'S'
+    sta DOSFNAME,y
+    iny
+    lda #','
+    sta DOSFNAME,y
+    iny
+    lda #'W'
+    sta DOSFNAME,y
+    iny
+
+    ; Y now has total length (filename + 4)
+    ; SETNAM(len=Y, ptr in X/Y for DOSFNAME)
+    tya                  ; A = total length
+    ldx #<DOSFNAME
+    ldy #>DOSFNAME
+    jsr SETNAM
+
+    ; SETLFS(LA=2, DEV=drive, SA=1)  SA=1 = SEQ write
+    lda #2
+    ldx save_drive_num
+    ldy #1
+    jsr SETLFS
+
+    ; Open file for write
+    jsr OPEN
+    jsr READST
+    beq @open_ok
+    jmp save_open_fail
+@open_ok:
+    ; Set output to logical file 2
+    ldx #2
+    jsr CHKOUT
+    jsr READST
+    beq @chkout_ok
+    jmp save_chkout_fail
+@chkout_ok:
+    ; Write bytes from RAM to disk
+save_write_loop:
+    lda tmp_len_lo
+    ora tmp_len_hi
+    beq save_write_done
+
+    ldy #0
+    lda (PTR_LO),y
+    jsr CHROUT
+
+    ; PTR++
+    inc PTR_LO
+    bne save_ptr_ok
+    inc PTR_HI
+save_ptr_ok:
+
+    ; len--
+    lda tmp_len_lo
+    bne save_dec_lo
+    dec tmp_len_hi
+save_dec_lo:
+    dec tmp_len_lo
+
+    ; Check for disk errors
+    jsr READST
+    and #$BF             ; mask out EOI bit
+    beq save_write_loop
+
+    ; Write error occurred
+    jmp save_write_error
+
+save_write_done:
+    ; Close file and restore I/O
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+
+    ; Print success message
+    lda #<save_ok_txt
+    sta ZPTR_LO
+    lda #>save_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+
+    ; Print drive status
+    jsr print_drive_status
+    rts
+
+save_next_entry:
+    ; Advance DPTR += DIR_ENTRY_SIZE
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc save_nc
+    inc DPTR_HI
+save_nc:
+    dex
+    beq save_notfound
+    jmp save_entry
+
+save_notfound:
+    lda #<notfound_txt
+    sta ZPTR_LO
+    lda #>notfound_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+save_usage:
+    lda #<save_usage_txt
+    sta ZPTR_LO
+    lda #>save_usage_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+save_open_fail:
+    jsr CLRCHN
+    lda #<dos_openfail_txt
+    sta ZPTR_LO
+    lda #>dos_openfail_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jsr print_drive_status
+    rts
+
+save_chkout_fail:
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    lda #<dos_nochan_txt
+    sta ZPTR_LO
+    lda #>dos_nochan_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+save_write_error:
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    lda #<save_write_err_txt
+    sta ZPTR_LO
+    lda #>save_write_err_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jsr print_drive_status
+    rts
+
+; ------------------------------------------------------------
+; cmd_load
+; LOAD <filename>
+;
+; Loads a file from disk (device 8) into RAM filesystem.
+;
+; Operation:
+;   1. Parse filename from LINEBUF
+;   2. Open SEQ file for read on device 8 (SA=0)
+;   3. Check available heap space
+;   4. Stream bytes from disk to RAM heap
+;   5. Create or update RAM filesystem entry
+;   6. Close file and check status
+;
+; Error handling:
+;   - File not found on disk
+;   - Out of RAM heap space
+;   - Directory full
+;   - Disk error
+; ------------------------------------------------------------
+cmd_load:
+    lda #13
+    jsr CHROUT
+
+    ; Move X past "LOAD" (4 chars)
+    txa
+    clc
+    adc #4
+    tax
+
+; --- Skip spaces before filename ---
+load_skip1:
+    lda LINEBUF,x
+    bne load_chksp
+    jmp load_usage
+
+load_chksp:
+    cmp #$20
+    bne load_check_drive
+    inx
+    bne load_skip1
+
+; --- Check for drive number (8:, 9:, 10:, 11:) ---
+load_check_drive:
+    ; Use global default drive
+    lda default_drive
+    sta load_drive_num
+
+    ; Check if digit
+    lda LINEBUF,x
+    cmp #'8'
+    beq load_try_8
+    cmp #'9'
+    beq load_try_9
+    cmp #'1'
+    beq load_try_10_11
+    jmp load_name_start    ; Not a drive spec
+
+load_try_8:
+    ; Check for '8:'
+    lda LINEBUF+1,x
+    cmp #':'
+    bne load_name_start
+    lda #8
+    sta load_drive_num
+    inx
+    inx
+    jmp load_name_start
+
+load_try_9:
+    ; Check for '9:'
+    lda LINEBUF+1,x
+    cmp #':'
+    bne load_name_start
+    lda #9
+    sta load_drive_num
+    inx
+    inx
+    jmp load_name_start
+
+load_try_10_11:
+    ; Could be '10:' or '11:'
+    lda LINEBUF+1,x
+    cmp #'0'
+    beq load_try_10
+    cmp #'1'
+    beq load_try_11
+    jmp load_name_start
+
+load_try_10:
+    ; Check for '10:'
+    lda LINEBUF+2,x
+    cmp #':'
+    bne load_name_start
+    lda #10
+    sta load_drive_num
+    inx
+    inx
+    inx
+    jmp load_name_start
+
+load_try_11:
+    ; Check for '11:'
+    lda LINEBUF+2,x
+    cmp #':'
+    bne load_name_start
+    lda #11
+    sta load_drive_num
+    inx
+    inx
+    inx
+    jmp load_name_start
+
+load_name_start:
+    ; Build NAMEBUF (8 chars padded with spaces)
+    ldy #0
+load_fill:
+    lda #' '
+    sta NAMEBUF,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne load_fill
+
+    ; Copy first 8 chars of filename into NAMEBUF
+    stx load_tmp_x       ; save X for disk filename
+    ldy #0
+load_copy:
+    lda LINEBUF,x
+    beq load_open_file
+    cmp #$20
+    beq load_open_file
+    cpy #DIR_NAME_LEN
+    beq load_skip_rest   ; already got 8 chars
+    sta NAMEBUF,y
+    iny
+load_skip_rest:
+    inx
+    jmp load_copy
+
+load_open_file:
+    ; Calculate filename length for disk
+    ldx load_tmp_x
+    ldy #0
+load_flen:
+    lda LINEBUF,x
+    beq load_have_flen
+    cmp #$20
+    beq load_have_flen
+    inx
+    iny
+    cpy #16              ; max filename length
+    bne load_flen
+
+load_have_flen:
+    tya
+    bne @ok
+    jmp load_usage
+@ok:
+    ; Copy filename from LINEBUF to DOSFNAME and append ",S,R"
+    sty load_flen_tmp    ; save filename length
+    ldx load_tmp_x       ; X = start of filename in LINEBUF
+    ldy #0               ; Y = index into DOSFNAME
+load_copy_fname:
+    lda LINEBUF,x
+    sta DOSFNAME,y
+    inx
+    iny
+    cpy load_flen_tmp
+    bne load_copy_fname
+
+    ; Append ",S,R" to DOSFNAME
+    lda #','
+    sta DOSFNAME,y
+    iny
+    lda #'S'
+    sta DOSFNAME,y
+    iny
+    lda #','
+    sta DOSFNAME,y
+    iny
+    lda #'R'
+    sta DOSFNAME,y
+    iny
+
+    ; Y now has total length (filename + 4)
+    ; SETNAM(len=Y, ptr in X/Y for DOSFNAME)
+    tya                  ; A = total length
+    ldx #<DOSFNAME
+    ldy #>DOSFNAME
+    jsr SETNAM
+
+    ; SETLFS(LA=2, DEV=drive, SA=0)  SA=0 = SEQ read
+    lda #2
+    ldx load_drive_num
+    ldy #0
+    jsr SETLFS
+
+    ; Open file for read
+    jsr OPEN
+    jsr READST
+    beq @open_ok
+    jmp load_open_fail
+@open_ok:
+    ; Set input from logical file 2
+    ldx #2
+    jsr CHKIN
+    jsr READST
+    beq @chkin_ok
+    jmp load_chkin_fail
+@chkin_ok:
+
+    ; PTR = current heap position (where we'll write)
+    lda fs_heap_lo
+    sta PTR_LO
+    lda fs_heap_hi
+    sta PTR_HI
+
+    ; tmp_len = 0 (will count bytes read)
+    lda #0
+    sta tmp_len_lo
+    sta tmp_len_hi
+
+    ; Read bytes from disk to RAM
+load_read_loop:
+    jsr READST
+    and #$40             ; check EOI bit
+    bne load_read_done
+
+    jsr CHRIN
+
+    ; Check for errors (except EOI)
+    pha
+    jsr READST
+    and #$BF             ; mask out EOI
+    beq load_read_ok
+    pla
+    jmp load_read_error
+
+load_read_ok:
+    pla
+
+    ; Store byte at PTR
+    ldy #0
+    sta (PTR_LO),y
+
+    ; PTR++
+    inc PTR_LO
+    bne load_ptr_ok
+    inc PTR_HI
+load_ptr_ok:
+
+    ; len++
+    inc tmp_len_lo
+    bne load_len_ok
+    inc tmp_len_hi
+load_len_ok:
+
+    ; Check heap limit (simple check: don't exceed $9FFF)
+    lda PTR_HI
+    cmp #$A0
+    bcc @heap_ok
+    jmp load_heap_full
+@heap_ok:
+    jmp load_read_loop
+
+load_read_done:
+    ; Close file and restore I/O
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+
+    ; Now create or update RAM filesystem entry
+    ; First check if file already exists
+    lda DIR_COUNT
+    beq load_create_new  ; no files, create new
+
+    ; Search for existing file
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+
+    ldx DIR_COUNT
+
+load_search_loop:
+    ; Compare 8 bytes of name
+    ldy #0
+load_search_cmp:
+    lda (DPTR_LO),y
+    cmp NAMEBUF,y
+    bne load_search_next
+    iny
+    cpy #DIR_NAME_LEN
+    bne load_search_cmp
+
+    ; MATCH! Update existing entry
+    jmp load_update_entry
+
+load_search_next:
+    ; Advance DPTR += DIR_ENTRY_SIZE
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc load_snc
+    inc DPTR_HI
+load_snc:
+    dex
+    beq load_create_new
+    jmp load_search_loop
+
+load_create_new:
+    ; Check if directory is full
+    lda DIR_COUNT
+    cmp #DIR_MAX
+    bcc load_room
+    jmp load_dir_full
+
+load_room:
+    ; DPTR = DIR_TABLE + (DIR_COUNT * DIR_ENTRY_SIZE)
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+
+    ldy DIR_COUNT
+load_adv:
+    cpy #0
+    beq load_entry_ready
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc load_adv_nc
+    inc DPTR_HI
+load_adv_nc:
+    dey
+    jmp load_adv
+
+load_entry_ready:
+    ; Clear entry
+    ldy #0
+load_clr_entry:
+    lda #0
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_ENTRY_SIZE
+    bne load_clr_entry
+
+    ; Write NAMEBUF into entry
+    ldy #0
+load_write_name:
+    lda NAMEBUF,y
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_NAME_LEN
+    bne load_write_name
+
+    ; Increment DIR_COUNT
+    inc DIR_COUNT
+
+load_update_entry:
+    ; Write start address (fs_heap_lo/hi before we read)
+    ldy #DIR_OFF_START
+    lda fs_heap_lo
+    sta (DPTR_LO),y
+    iny
+    lda fs_heap_hi
+    sta (DPTR_LO),y
+
+    ; Write length
+    ldy #DIR_OFF_LEN
+    lda tmp_len_lo
+    sta (DPTR_LO),y
+    iny
+    lda tmp_len_hi
+    sta (DPTR_LO),y
+
+    ; Stamp date/time
+    jsr fs_stamp_entry_datetime
+
+    ; Update heap pointer
+    lda PTR_LO
+    sta fs_heap_lo
+    lda PTR_HI
+    sta fs_heap_hi
+
+    ; Print success message
+    lda #<load_ok_txt
+    sta ZPTR_LO
+    lda #>load_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+
+    ; Print size
+    lda tmp_len_hi
+    ldx tmp_len_lo
+    jsr print_u16_dec
+
+    lda #<load_bytes_txt
+    sta ZPTR_LO
+    lda #>load_bytes_txt
+    sta ZPTR_HI
+    jsr print_z
+
+    lda #13
+    jsr CHROUT
+    rts
+
+load_usage:
+    lda #<load_usage_txt
+    sta ZPTR_LO
+    lda #>load_usage_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+load_open_fail:
+    jsr CLRCHN
+    lda #<load_notfound_txt
+    sta ZPTR_LO
+    lda #>load_notfound_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jsr print_drive_status
+    rts
+
+load_chkin_fail:
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    lda #<dos_nochan_txt
+    sta ZPTR_LO
+    lda #>dos_nochan_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+load_read_error:
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    lda #<load_read_err_txt
+    sta ZPTR_LO
+    lda #>load_read_err_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jsr print_drive_status
+    rts
+
+load_heap_full:
+    jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    lda #<load_heap_full_txt
+    sta ZPTR_LO
+    lda #>load_heap_full_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+load_dir_full:
+    lda #<full_txt
+    sta ZPTR_LO
+    lda #>full_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+; ------------------------------------------------------------
+; cmd_cp
+; CP <source> <dest>
+;
+; Copies a file within the RAM filesystem.
+;
+; Operation:
+;   1. Parse source and dest filenames from LINEBUF
+;   2. Find source file in RAM filesystem
+;   3. Check directory has room for new file
+;   4. Allocate heap space for copy
+;   5. Copy bytes from source to new location
+;   6. Create new directory entry with dest name
+;   7. Stamp with current date/time
+;
+; Error handling:
+;   - Source file not found
+;   - Directory full (8 files max)
+;   - Out of heap space
+;   - Missing arguments
+; ------------------------------------------------------------
+cmd_cp:
+    lda #13
+    jsr CHROUT
+
+    ; Move X past "CP" (2 chars)
+    txa
+    clc
+    adc #2
+    tax
+
+; --- Skip spaces before source filename ---
+cp_skip1:
+    lda LINEBUF,x
+    bne cp_chksp1
+    jmp cp_usage
+
+cp_chksp1:
+    cmp #$20
+    bne cp_src_start
+    inx
+    bne cp_skip1
+
+cp_src_start:
+    ; Build source NAMEBUF (8 chars padded with spaces)
+    ldy #0
+cp_fill_src:
+    lda #' '
+    sta NAMEBUF,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne cp_fill_src
+
+    ; Copy source filename into NAMEBUF
+    ldy #0
+cp_copy_src:
+    lda LINEBUF,x
+    bne @not_eol
+    jmp cp_usage         ; no space after source = missing dest
+@not_eol:
+    cmp #$20
+    beq cp_src_done
+    sta NAMEBUF,y
+    iny
+    inx
+    cpy #DIR_NAME_LEN
+    bne cp_copy_src
+
+    ; If source >8 chars, skip remainder until space
+cp_skip_long_src:
+    lda LINEBUF,x
+    bne @not_eol2
+    jmp cp_usage
+@not_eol2:
+    cmp #$20
+    beq cp_src_done
+    inx
+    bne cp_skip_long_src
+
+cp_src_done:
+    ; X points to space after source, skip spaces before dest
+cp_skip2:
+    lda LINEBUF,x
+    bne @not_eol3
+    jmp cp_usage         ; EOL = missing dest
+@not_eol3:
+    cmp #$20
+    bne cp_dest_start
+    inx
+    bne cp_skip2
+
+cp_dest_start:
+    ; Save source name to cp_srcname buffer
+    ldy #0
+cp_save_src:
+    lda NAMEBUF,y
+    sta cp_srcname,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne cp_save_src
+
+    ; Now build dest NAMEBUF
+    ldy #0
+cp_fill_dest:
+    lda #' '
+    sta NAMEBUF,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne cp_fill_dest
+
+    ; Copy dest filename into NAMEBUF
+    ldy #0
+cp_copy_dest:
+    lda LINEBUF,x
+    beq cp_search_src    ; EOL = done
+    cmp #$20
+    beq cp_search_src    ; space = done
+    sta NAMEBUF,y
+    iny
+    inx
+    cpy #DIR_NAME_LEN
+    bne cp_copy_dest
+
+    ; If dest >8 chars, skip remainder
+cp_skip_long_dest:
+    lda LINEBUF,x
+    beq cp_search_src
+    cmp #$20
+    beq cp_search_src
+    inx
+    bne cp_skip_long_dest
+
+cp_search_src:
+    ; Check for wildcard in dest filename
+    ldy #0
+cp_check_wildcard:
+    lda NAMEBUF,y
+    cmp #'*'
+    bne @not_wildcard
+    jmp cp_invalid_name
+@not_wildcard:
+    iny
+    cpy #DIR_NAME_LEN
+    bne cp_check_wildcard
+
+    ; Search for source file in RAM filesystem
+    lda DIR_COUNT
+    bne cp_has_files
+    jmp cp_src_notfound
+
+cp_has_files:
+    ; DPTR = DIR_TABLE
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+
+    ldx DIR_COUNT
+
+cp_src_entry:
+    ; Compare 8 bytes of source name
+    ldy #0
+cp_src_cmp:
+    lda (DPTR_LO),y
+    cmp cp_srcname,y
+    beq @match
+    jmp cp_src_next
+@match:
+    iny
+    cpy #DIR_NAME_LEN
+    bne cp_src_cmp
+
+    ; FOUND! Read source start address and length
+    ldy #DIR_OFF_START
+    lda (DPTR_LO),y
+    sta cp_src_start_lo
+    iny
+    lda (DPTR_LO),y
+    sta cp_src_start_hi
+
+    ldy #DIR_OFF_LEN
+    lda (DPTR_LO),y
+    sta cp_src_len_lo
+    iny
+    lda (DPTR_LO),y
+    sta cp_src_len_hi
+
+    jmp cp_check_dir
+
+cp_src_next:
+    ; Advance DPTR += DIR_ENTRY_SIZE
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc cp_src_nc
+    inc DPTR_HI
+cp_src_nc:
+    dex
+    beq cp_src_notfound
+    jmp cp_src_entry
+
+cp_src_notfound:
+    lda #<cp_src_notfound_txt
+    sta ZPTR_LO
+    lda #>cp_src_notfound_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+cp_check_dir:
+    ; Check if directory is full
+    lda DIR_COUNT
+    cmp #DIR_MAX
+    bcc cp_dir_ok
+    jmp cp_dir_full
+
+cp_dir_ok:
+    ; Check if dest already exists (optional - we'll allow overwrite by creating new)
+    ; For simplicity, we'll just create a new entry
+
+    ; Check heap space available
+    ; Calculate required space = cp_src_len
+    ; Check if fs_heap + len would exceed $A000
+    clc
+    lda fs_heap_lo
+    adc cp_src_len_lo
+    sta cp_new_end_lo
+    lda fs_heap_hi
+    adc cp_src_len_hi
+    sta cp_new_end_hi
+
+    ; Check if new_end >= $A000
+    cmp #$A0
+    bcc cp_heap_ok
+    jmp cp_heap_full
+
+cp_heap_ok:
+    ; Allocate new directory entry
+    ; DPTR = DIR_TABLE + (DIR_COUNT * DIR_ENTRY_SIZE)
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+
+    ldy DIR_COUNT
+cp_adv_dir:
+    cpy #0
+    beq cp_entry_ready
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc cp_adv_nc
+    inc DPTR_HI
+cp_adv_nc:
+    dey
+    jmp cp_adv_dir
+
+cp_entry_ready:
+    ; Clear new entry
+    ldy #0
+cp_clr_entry:
+    lda #0
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_ENTRY_SIZE
+    bne cp_clr_entry
+
+    ; Write dest name into entry
+    ldy #0
+cp_write_name:
+    lda NAMEBUF,y
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_NAME_LEN
+    bne cp_write_name
+
+    ; Write start address (current heap pointer)
+    ldy #DIR_OFF_START
+    lda fs_heap_lo
+    sta (DPTR_LO),y
+    iny
+    lda fs_heap_hi
+    sta (DPTR_LO),y
+
+    ; Write length
+    ldy #DIR_OFF_LEN
+    lda cp_src_len_lo
+    sta (DPTR_LO),y
+    iny
+    lda cp_src_len_hi
+    sta (DPTR_LO),y
+
+    ; Stamp date/time
+    jsr fs_stamp_entry_datetime
+
+    ; Increment DIR_COUNT
+    inc DIR_COUNT
+
+    ; Now copy the actual file data
+    ; PTR = source address
+    lda cp_src_start_lo
+    sta PTR_LO
+    lda cp_src_start_hi
+    sta PTR_HI
+
+    ; ZPTR = dest address (current heap)
+    lda fs_heap_lo
+    sta ZPTR_LO
+    lda fs_heap_hi
+    sta ZPTR_HI
+
+    ; Copy length to working vars
+    lda cp_src_len_lo
+    sta tmp_len_lo
+    lda cp_src_len_hi
+    sta tmp_len_hi
+
+cp_copy_loop:
+    ; Check if done
+    lda tmp_len_lo
+    ora tmp_len_hi
+    beq cp_copy_done
+
+    ; Copy one byte
+    ldy #0
+    lda (PTR_LO),y
+    sta (ZPTR_LO),y
+
+    ; PTR++
+    inc PTR_LO
+    bne cp_ptr_ok
+    inc PTR_HI
+cp_ptr_ok:
+
+    ; ZPTR++
+    inc ZPTR_LO
+    bne cp_zptr_ok
+    inc ZPTR_HI
+cp_zptr_ok:
+
+    ; len--
+    lda tmp_len_lo
+    bne cp_dec_lo
+    dec tmp_len_hi
+cp_dec_lo:
+    dec tmp_len_lo
+
+    jmp cp_copy_loop
+
+cp_copy_done:
+    ; Update heap pointer
+    lda cp_new_end_lo
+    sta fs_heap_lo
+    lda cp_new_end_hi
+    sta fs_heap_hi
+
+    ; Print success message
+    lda #<cp_ok_txt
+    sta ZPTR_LO
+    lda #>cp_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+cp_invalid_name:
+    lda #<invalid_filename_txt
+    sta ZPTR_LO
+    lda #>invalid_filename_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+cp_usage:
+    lda #<cp_usage_txt
+    sta ZPTR_LO
+    lda #>cp_usage_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+cp_dir_full:
+    lda #<full_txt
+    sta ZPTR_LO
+    lda #>full_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+cp_heap_full:
+    lda #<cp_heap_full_txt
+    sta ZPTR_LO
+    lda #>cp_heap_full_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+; Variables for CP command
+cp_srcname:       !fill DIR_NAME_LEN, ' '
+cp_src_start_lo:  !byte 0
+cp_src_start_hi:  !byte 0
+cp_src_len_lo:    !byte 0
+cp_src_len_hi:    !byte 0
+cp_new_end_lo:    !byte 0
+cp_new_end_hi:    !byte 0
+
+; ------------------------------------------------------------
+; cmd_mv
+; MV <source> <dest>
+;
+; Renames (moves) a file within the RAM filesystem.
+;
+; Operation:
+;   1. Parse source and dest filenames from LINEBUF
+;   2. Find source file in RAM filesystem
+;   3. Check if dest already exists (warn if it does)
+;   4. Update directory entry name field
+;   5. No data copying needed - just rename!
+;
+; Error handling:
+;   - Source file not found
+;   - Dest file already exists
+;   - Missing arguments
+; ------------------------------------------------------------
+cmd_mv:
+    lda #13
+    jsr CHROUT
+
+    ; Move X past "MV" (2 chars)
+    txa
+    clc
+    adc #2
+    tax
+
+; --- Skip spaces before source filename ---
+mv_skip1:
+    lda LINEBUF,x
+    bne mv_chksp1
+    jmp mv_usage
+
+mv_chksp1:
+    cmp #$20
+    bne mv_src_start
+    inx
+    bne mv_skip1
+
+mv_src_start:
+    ; Build source NAMEBUF (8 chars padded with spaces)
+    ldy #0
+mv_fill_src:
+    lda #' '
+    sta NAMEBUF,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne mv_fill_src
+
+    ; Copy source filename into NAMEBUF
+    ldy #0
+mv_copy_src:
+    lda LINEBUF,x
+    bne @not_eol
+    jmp mv_usage         ; no space after source = missing dest
+@not_eol:
+    cmp #$20
+    beq mv_src_done
+    sta NAMEBUF,y
+    iny
+    inx
+    cpy #DIR_NAME_LEN
+    bne mv_copy_src
+
+    ; If source >8 chars, skip remainder until space
+mv_skip_long_src:
+    lda LINEBUF,x
+    bne @not_eol2
+    jmp mv_usage
+@not_eol2:
+    cmp #$20
+    beq mv_src_done
+    inx
+    bne mv_skip_long_src
+
+mv_src_done:
+    ; X points to space after source, skip spaces before dest
+mv_skip2:
+    lda LINEBUF,x
+    bne @not_eol3
+    jmp mv_usage         ; EOL = missing dest
+@not_eol3:
+    cmp #$20
+    bne mv_dest_start
+    inx
+    bne mv_skip2
+
+mv_dest_start:
+    ; Save source name to mv_srcname buffer
+    ldy #0
+mv_save_src:
+    lda NAMEBUF,y
+    sta mv_srcname,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne mv_save_src
+
+    ; Now build dest NAMEBUF
+    ldy #0
+mv_fill_dest:
+    lda #' '
+    sta NAMEBUF,y
+    iny
+    cpy #DIR_NAME_LEN
+    bne mv_fill_dest
+
+    ; Copy dest filename into NAMEBUF
+    ldy #0
+mv_copy_dest:
+    lda LINEBUF,x
+    beq mv_check_dest    ; EOL = done
+    cmp #$20
+    beq mv_check_dest    ; space = done
+    sta NAMEBUF,y
+    iny
+    inx
+    cpy #DIR_NAME_LEN
+    bne mv_copy_dest
+
+    ; If dest >8 chars, skip remainder
+mv_skip_long_dest:
+    lda LINEBUF,x
+    beq mv_check_dest
+    cmp #$20
+    beq mv_check_dest
+    inx
+    bne mv_skip_long_dest
+
+mv_check_dest:
+    ; Check for wildcard in dest filename
+    ldy #0
+mv_check_wildcard:
+    lda NAMEBUF,y
+    cmp #'*'
+    bne @not_wildcard
+    jmp mv_invalid_name
+@not_wildcard:
+    iny
+    cpy #DIR_NAME_LEN
+    bne mv_check_wildcard
+
+    ; Check if dest file already exists
+    lda DIR_COUNT
+    beq mv_search_src    ; no files, can't exist
+
+    ; Search for dest in directory
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+
+    ldx DIR_COUNT
+
+mv_dest_check_loop:
+    ; Compare 8 bytes of dest name
+    ldy #0
+mv_dest_cmp:
+    lda (DPTR_LO),y
+    cmp NAMEBUF,y
+    beq @match
+    jmp mv_dest_check_next
+@match:
+    iny
+    cpy #DIR_NAME_LEN
+    bne mv_dest_cmp
+
+    ; Dest exists! Error.
+    jmp mv_dest_exists
+
+mv_dest_check_next:
+    ; Advance DPTR += DIR_ENTRY_SIZE
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc mv_dest_nc
+    inc DPTR_HI
+mv_dest_nc:
+    dex
+    beq mv_search_src
+    jmp mv_dest_check_loop
+
+mv_search_src:
+    ; Search for source file in RAM filesystem
+    lda DIR_COUNT
+    bne mv_has_files
+    jmp mv_src_notfound
+
+mv_has_files:
+    ; DPTR = DIR_TABLE
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+
+    ldx DIR_COUNT
+
+mv_src_entry:
+    ; Compare 8 bytes of source name
+    ldy #0
+mv_src_cmp:
+    lda (DPTR_LO),y
+    cmp mv_srcname,y
+    beq @match
+    jmp mv_src_next
+@match:
+    iny
+    cpy #DIR_NAME_LEN
+    bne mv_src_cmp
+
+    ; FOUND! Now update the name in place
+    ldy #0
+mv_rename:
+    lda NAMEBUF,y
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_NAME_LEN
+    bne mv_rename
+
+    ; Print success message
+    lda #<mv_ok_txt
+    sta ZPTR_LO
+    lda #>mv_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+mv_src_next:
+    ; Advance DPTR += DIR_ENTRY_SIZE
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc mv_src_nc
+    inc DPTR_HI
+mv_src_nc:
+    dex
+    beq mv_src_notfound
+    jmp mv_src_entry
+
+mv_src_notfound:
+    lda #<mv_src_notfound_txt
+    sta ZPTR_LO
+    lda #>mv_src_notfound_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+mv_dest_exists:
+    lda #<mv_dest_exists_txt
+    sta ZPTR_LO
+    lda #>mv_dest_exists_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+mv_invalid_name:
+    lda #<invalid_filename_txt
+    sta ZPTR_LO
+    lda #>invalid_filename_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+mv_usage:
+    lda #<mv_usage_txt
+    sta ZPTR_LO
+    lda #>mv_usage_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+; ------------------------------------------------------------
+; cmd_passwd
+; Change password with confirmation, then save to disk
+; ------------------------------------------------------------
+cmd_passwd:
+    lda #13
+    jsr CHROUT
+
+@again:
+    lda #<setup_pass_txt
+    sta ZPTR_LO
+    lda #>setup_pass_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+
+    ; Copy LINEBUF to PASSWORD
+    ldx #0
+@cp:
+    lda LINEBUF,x
+    sta PASSWORD,x
+    beq @copied
+    inx
+    cpx #USER_MAX-1
+    bcc @cp
+    lda #0
+    sta PASSWORD+USER_MAX-1
+@copied:
+
+    ; Ask for confirmation
+    lda #13
+    jsr CHROUT
+    lda #<setup_confirm_txt
+    sta ZPTR_LO
+    lda #>setup_confirm_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+
+    ; Compare LINEBUF against PASSWORD
+    ldx #0
+@cmp:
+    lda PASSWORD,x
+    beq @chk_end
+    cmp LINEBUF,x
+    bne @mismatch
+    inx
+    cpx #USER_MAX
+    bne @cmp
+    beq @match
+@chk_end:
+    lda LINEBUF,x
+    bne @mismatch
+@match:
+    ; Save to disk
+    jsr save_config
+    lda #<passwd_ok_txt
+    sta ZPTR_LO
+    lda #>passwd_ok_txt
+    sta ZPTR_HI
+    jsr print_z
+    rts
+@mismatch:
+    lda #13
+    jsr CHROUT
+    lda #<pass_mismatch_txt
+    sta ZPTR_LO
+    lda #>pass_mismatch_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jmp @again
+
+; Variables for MV command
+mv_srcname: !fill DIR_NAME_LEN, ' '
+
+; Variables for SAVE/LOAD commands
+save_tmp_x:     !byte 0
+load_tmp_x:     !byte 0
+save_flen_tmp:  !byte 0
+load_flen_tmp:  !byte 0
+save_drive_num: !byte 8
+load_drive_num: !byte 8
+default_drive:  !byte 8    ; Global default drive (8-11)
+
+; ------------------------------------------------------------
 ; msg_unknown
 ; ------------------------------------------------------------
 ; Prints the "UNKNOWN COMMAND" error message.
@@ -3035,7 +8033,6 @@ msg_unknown:
     bne @u
 @done:
     rts
-
 
 ; ============================================================
 ; FILESYSTEM SUBSYSTEM
@@ -3262,7 +8259,7 @@ print_place:
 ; ------------------------------------------------------------
 ; print_free_mem_line
 ; Prints: " FREE <bytes>" then CR
-; (Used by MEM and can be reused by UNAME, etc.)
+; (Used by MEM)
 ;
 ; Notes:
 ;   FREE = MEMSIZ ($37/$38) - VARTAB ($2D/$2E)
@@ -3436,6 +8433,10 @@ nibble_to_petscii:
 ; ============================================================
 
 USERNAME: !fill USER_MAX, 0
+PASSWORD: !fill USER_MAX, 0
+config_loaded:  !byte 0   ; 1 if CONFIG was loaded from disk
+login_user_ok:  !byte 0   ; scratch flag for login comparison
+login_attempts: !byte 0   ; login attempt counter
 DATE_STR: !fill DATE_MAX, 0
 TIME_STR: !fill TIME_MAX, 0
 
@@ -3446,6 +8447,7 @@ DIR_TABLE:   !fill (DIR_MAX*DIR_ENTRY_SIZE), 0    ; 240 bytes when DIR_ENTRY_SIZ
 ; --- scratch / temp ---
 tmp_len_lo:  !byte 0
 tmp_len_hi:  !byte 0
+cw_tmp_x:    !byte 0   ; temporary X storage for WRITE command
 
 ; --- heap pointer (next free byte in FS heap area) ---
 fs_heap_lo: !byte <FS_HEAP_BASE
@@ -3453,6 +8455,20 @@ fs_heap_hi: !byte >FS_HEAP_BASE
 
 ; --- reusable 8-char name buffer (padded with spaces) ---
 NAMEBUF: !fill DIR_NAME_LEN, ' '
+
+; --- DOS filename buffer (for appending ,S,W or ,S,R) ---
+DOSFNAME: !fill 20, 0
+
+; --- nano editor state ---
+nano_existing:     !byte 0   ; 0=new file, 1=editing existing
+nano_tmp_x:        !byte 0   ; temporary storage for X register
+nano_old_start_lo: !byte 0   ; existing file start address (lo)
+nano_old_start_hi: !byte 0   ; existing file start address (hi)
+nano_old_len_lo:   !byte 0   ; existing file length (lo)
+nano_old_len_hi:   !byte 0   ; existing file length (hi)
+nano_tmp_lo:       !byte 0   ; temp for calculations
+nano_tmp_hi:       !byte 0   ; temp for calculations
+NANONAME:          !fill 8, ' '
 
 ; --- decimal print scratch (used by print_u16_dec/print_place) ---
 dec_tmp_lo: !byte 0
@@ -3518,6 +8534,15 @@ d_max:      !byte 0
 d_tmp:      !byte 0
 
 ; ============================================================
+; UPTIME STATE
+; ============================================================
+BOOT_SEC_LO:   !byte 0   ; seconds since midnight at boot (low)
+BOOT_SEC_HI:   !byte 0   ; seconds since midnight at boot (high)
+
+UP_DAYS_LO:    !byte 0   ; number of midnight rollovers since boot (low)
+UP_DAYS_HI:    !byte 0   ; number of midnight rollovers since boot (high)
+
+; ============================================================
 ; TEXT CONSTANTS (PETSCII / SCREEN OUTPUT)
 ; ============================================================
 
@@ -3525,12 +8550,32 @@ d_tmp:      !byte 0
 ; Text (UPPERCASE only)
 ; -------------------------
 
+; --- Boot sequence text ---
+boot_ok_txt:      !text "[  OK  ] ",0
+boot_kern_txt:    !text "STARTING C64UX KERNEL ", C64UX_VERSION,0
+boot_mem_txt:     !text "MEMORY CHECK: 64K RAM SYSTEM",0
+boot_fs_txt:      !text "INITIALIZING FILESYSTEM",0
+boot_heap_txt:    !text "HEAP ALLOCATED AT $6000",0
+boot_hw_txt:      !text "DETECTING HARDWARE",0
+boot_reu_yes_txt: !text "REU: DETECTED",0
+boot_reu_no_txt:  !text "REU: NOT FOUND",0
+boot_drv_txt:     !text "LOADING DEVICE DRIVERS",0
+boot_mnt_txt:     !text "MOUNTING /DEV/DISK (DEVICE 8)",0
+
 ; --- Banners / prompts ---
 banner_txt:
-!text 13,"  **** C64UX V0.1 BY A. SCAROLA ****",13,"      TYPE 'HELP' FOR ASSISTANCE",13,0
+!byte 13,5    ; newline + white color
+!text "  **** C64UX ", C64UX_VERSION, " BY A. SCAROLA ****",13,0
+
+banner_help_txt:
+!byte 5       ; white color
+!text "      TYPE 'HELP' FOR ASSISTANCE",13,0
+
+setup_header_txt:
+!text "--------------",13,"INITIAL SETUP:",13,"--------------",13,0
 
 setup_user_txt:
-!text "--------------",13,"INITIAL SETUP:",13,"--------------",13,"USERNAME (MAX 15): ",0
+!text "USERNAME (MAX 15): ",0
 
 setup_date_txt:
 !text "DATE (YYYY-MM-DD): ",0
@@ -3547,25 +8592,50 @@ default_date_txt:
 default_time_txt:
 !text "00:00:00",0
 
-prompt_txt:
-!text "C64UX % ",0
+prompt_tail_txt:
+!text "@C64UX:% ",0
 
-help_txt:
+help_txt_part1:
 !text "COMMANDS:",13
-!text "  CAT    - PRINT FILE",13
-!text "  CLEAR  - CLEAR SCREEN",13
-!text "  DATE   - SHOW CURRENT DATE",13
-!text "  ECHO   - PRINT TEXT",13
-!text "  EXIT   - RETURN TO BASIC",13
-!text "  HELP   - THIS HELP",13
-!text "  LS     - LIST FILES",13
-!text "  MEM    - SHOW FREE MEMORY",13
-!text "  RM     - DELETE FILE",13
-!text "  STAT   - FILE INFO",13
-!text "  TIME   - SHOW CURRENT TIME",13
-!text "  UNAME  - SYSTEM INFO",13
-!text "  WHOAMI - SHOW USERNAME",13
-!text "  WRITE  - CREATE FILE",13,0
+!text "  CAT     - PRINT FILE",13
+!text "  CLEAR   - CLEAR SCREEN (ALIAS: CLS)",13
+!text "  CP      - COPY FILE (RAM TO RAM)",13
+!text "  DATE    - CURRENT DATE",13
+!text "  DOS     - DISK DOS (DEV 8)",13
+!text "             DOS @$ = DIR; I0, S:, R:",13
+!text "  DRIVE   - SET/SHOW DEFAULT DRIVE 8-11",13
+!text "             DRIVE, DRIVE 9, DRIVE 10",13
+!text "  ECHO    - PRINT TEXT",13
+!text "  EXIT    - RETURN TO BASIC",13
+!text "  HELP    - SHOW THIS HELP",13
+!text "  LOAD    - LOAD FILE FROM DISK TO RAM",13
+!text "             LOAD 9:FILE, LOAD 10:FILE",13
+!text "  LOADREU - LOAD RAM FS FROM REU",13
+!text "  LS      - LIST FILES",13,0
+
+help_more_txt:
+!text 13,"-- PRESS ANY KEY TO CONTINUE --",13,0
+
+help_txt_part2:
+!text 13,"  MEM     - FREE MEMORY",13
+!text "  MV      - MOVE/RENAME FILE",13
+!text "  NANO    - EDIT FILE",13
+!text "  PASSWD  - CHANGE PASSWORD",13
+!text "  PWD     - SHOW CURRENT PATH",13
+!text "  RM      - DELETE FILE",13
+!text "  SAVE    - SAVE FILE FROM RAM TO DISK",13
+!text "             SAVE 9:FILE, SAVE 10:FILE",13
+!text "  SAVEREU - SAVE RAM FS TO REU",13
+!text "  STAT    - FILE INFO",13
+!text "  THEME   - SET COLOR THEME",13
+!text "             NORMAL, DARK, GREEN",13
+!text "  TIME    - CURRENT TIME",13
+!text "  UNAME   - SYSTEM INFO",13
+!text "  UPTIME  - SYSTEM UPTIME",13
+!text "  VERSION - SYSTEM VERSION (ALIAS: VER)",13
+!text "  WHOAMI  - SHOW USERNAME",13
+!text "  WIPEREU - WIPE REU (CLEAR FS)",13
+!text "  WRITE   - CREATE FILE",13,0
 
 ; --- Status labels ---
 stat_name_txt:
@@ -3583,6 +8653,22 @@ stat_date_txt:
 stat_time_txt:
 !text "TIME: ",0
 
+; --- Nano text ---
+nano_usage_txt:
+!text "USAGE: NANO <NAME>",0
+
+nano_hdr_txt:
+!text "ENTER TEXT. END WITH A SINGLE '.' LINE.",0
+
+nano_existing_txt:
+!text "--- EXISTING CONTENT ---",0
+
+nano_prompt_txt:
+!text "> ",0
+
+nano_done_txt:
+!text "SAVED.",0
+
 ; --- Errors / usage ---
 notfound_txt:
 !text "FILE NOT FOUND",0
@@ -3593,6 +8679,9 @@ cat_usage_txt:
 rm_usage_txt:
 !text "USAGE: RM FILENAME",0
 
+rm_wild_ok_txt:
+!text "FILES DELETED",0
+
 stat_usage_txt:
 !text "USAGE: STAT FILENAME",0
 
@@ -3601,7 +8690,7 @@ usage_txt:
 
 ; --- Misc ---
 uname_txt:
-!text "C64UX 0.1 6502 C64",0
+!text "C64UX ", C64UX_VERSION, " ", C64UX_BUILD_DATE, " (6502 C64)", 0
 
 whoami_txt:
 !text "USERNAME: ",0
@@ -3611,6 +8700,12 @@ ok_txt:
 
 full_txt:
 !text "DIRECTORY IS FULL",0
+
+file_exists_txt:
+!text "FILE ALREADY EXISTS",0
+
+invalid_filename_txt:
+!text "INVALID FILENAME (* NOT ALLOWED)",0
 
 unk_txt:
 !text "UNKNOWN COMMAND - TYPE 'HELP'",13,0
@@ -3624,3 +8719,168 @@ mem_free_txt:
 
 dbg_txt:
 !text "BUF:",0
+
+pwd_prefix_txt:
+!text "/HOME/",0
+
+dos_usage_txt:
+!text "USAGE: DOS <CMD>",0
+
+dos_status_txt:
+!text "STATUS: ",0
+
+dos_nochan_txt:
+!text "CHANNEL ERROR (NO DRIVE?)",0
+
+dos_openfail_txt:
+!text "OPEN FAILED (NO DRIVE?)",0
+
+dir_name_txt:
+!text "$",0
+
+; --- REU text ---
+reu_banner_txt:
+!byte 5       ; white color
+!text "             REU DETECTED",13,0
+
+reu_notfound_txt:
+!byte 13,5    ; newline + white color
+!text "NO REU DETECTED",0
+
+savereu_ok_txt:
+!text 13,"FILESYSTEM SAVED TO REU",0
+
+loadreu_ok_txt:
+!text 13,"FILESYSTEM LOADED FROM REU",0
+
+loadreu_bad_txt:
+!text 13,"REU IMAGE INVALID",0
+
+savereu_fail_txt:
+!text 13,"FILESYSTEM SAVE FAILED",0
+
+wipereu_ok_txt:
+!text 13,"REU WIPED",0
+
+; --- SAVE/LOAD command text ---
+save_usage_txt:
+!text "USAGE: SAVE <FILENAME>",0
+
+save_ok_txt:
+!text "SAVED TO DISK. ",0
+
+save_write_err_txt:
+!text "DISK WRITE ERROR. ",0
+
+load_usage_txt:
+!text "USAGE: LOAD <FILENAME>",0
+
+load_ok_txt:
+!text "LOADED ",0
+
+load_bytes_txt:
+!text " BYTES FROM DISK.",0
+
+load_notfound_txt:
+!text "FILE NOT FOUND ON DISK. ",0
+
+load_read_err_txt:
+!text "DISK READ ERROR. ",0
+
+; --- DRIVE command text ---
+drive_usage_txt:
+!text "USAGE: DRIVE [8|9|10|11]",0
+
+drive_current_txt:
+!text "DEFAULT DRIVE: ",0
+
+drive_set_txt:
+!text "DEFAULT DRIVE SET TO: ",0
+
+load_heap_full_txt:
+!text "OUT OF RAM HEAP SPACE.",0
+
+; --- CP command text ---
+cp_usage_txt:
+!text "USAGE: CP <SOURCE> <DEST>",0
+
+cp_ok_txt:
+!text "FILE COPIED.",0
+
+cp_src_notfound_txt:
+!text "SOURCE FILE NOT FOUND.",0
+
+cp_heap_full_txt:
+!text "OUT OF RAM HEAP SPACE.",0
+
+; --- MV command text ---
+mv_usage_txt:
+!text "USAGE: MV <SOURCE> <DEST>",0
+
+mv_ok_txt:
+!text "FILE RENAMED.",0
+
+mv_src_notfound_txt:
+!text "SOURCE FILE NOT FOUND.",0
+
+mv_dest_exists_txt:
+!text "DESTINATION FILE ALREADY EXISTS.",0
+
+; --- Credentials / login text ---
+setup_pass_txt:
+!text "PASSWORD (MAX 15): ",0
+
+setup_confirm_txt:
+!text "CONFIRM PASSWORD: ",0
+
+pass_mismatch_txt:
+!text "PASSWORDS DO NOT MATCH.",0
+
+login_user_txt:
+!text "USERNAME: ",0
+
+login_pass_txt:
+!text "PASSWORD: ",0
+
+login_fail_txt:
+!text "LOGIN INCORRECT.",0
+
+login_locked_txt:
+!text "TOO MANY ATTEMPTS.",0
+
+config_saved_txt:
+!text "CREDENTIALS SAVED.",0
+
+config_loaded_txt:
+!text "CREDENTIALS LOADED.",0
+
+passwd_ok_txt:
+!text "PASSWORD CHANGED.",0
+
+config_fname_r:
+!text "CONFIG,S,R",0
+
+config_fname_w:
+!text "@:CONFIG,S,W",0
+
+; --- THEME text ---
+theme_usage_txt:
+!text "USAGE: THEME <NORMAL, DARK, GREEN>",13,0
+
+theme_cur_txt:
+!text "CURRENT THEME: ",0
+
+theme_set_txt:
+!text "THEME SET TO: ",0
+
+theme_name_normal:
+!text "NORMAL",0
+
+theme_name_dark:
+!text "DARK",0
+
+theme_name_green:
+!text "GREEN",0
+
+; --- THEME state ---
+theme_mode: !byte 0    ; 0=NORMAL, 1=DARK, 2=GREEN
