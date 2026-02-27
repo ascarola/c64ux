@@ -5,7 +5,7 @@ login support, and theming — for the Commodore 64 (6502 assembly)
 **C64UX** is a Unix-inspired shell written entirely in **6502 assembly** for the **Commodore 64**.  
 It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, disk bridging, optional RAM Expansion Unit (REU) support, and now **user authentication and theming** to create a minimalist yet surprisingly capable retro system environment.
 
-**Current version:** v0.7  
+**Current version:** v0.7.3  
 **Author:** Anthony Scarola  
 **Development:** Designed and directed by Anthony Scarola; code developed with assistance from Claude Code (Anthropic)
 
