@@ -4707,31 +4707,6 @@ cmd_mem:
     jsr CHROUT
     jsr print_free_mem_line
     rts
-@t1:
-    lda mem_free_txt,x
-    beq @calc
-    jsr CHROUT
-    inx
-    bne @t1
-
-@calc:
-    ; FREE = MEMSIZ ($37/$38) - VARTAB ($2D/$2E)
-    sec
-    lda $37
-    sbc $2D
-    sta free_lo
-    lda $38
-    sbc $2E
-    sta free_hi
-
-    ; Print 16-bit number in decimal
-    lda free_hi
-    ldx free_lo
-    jsr print_u16_dec
-
-    lda #13
-    jsr CHROUT
-    rts
 
 free_lo: !byte 0
 free_hi: !byte 0
