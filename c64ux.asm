@@ -730,7 +730,7 @@ update_day_rollover:
     jmp @save
 
 @wrapped:
-    jsr inc_date_str             ; you’ll add this next
+    jsr inc_date_str
 
 @save:
     lda jlo
@@ -2945,7 +2945,7 @@ cmd_date:
     lda #13
     jsr CHROUT
 
-    jsr update_day_rollover      ; <-- ADD THIS
+    jsr update_day_rollover
 
     lda #<DATE_STR
     sta ZPTR_LO
@@ -2967,7 +2967,7 @@ cmd_time:
     lda #13
     jsr CHROUT
 
-    jsr update_day_rollover      ; <-- ADD THIS
+    jsr update_day_rollover
 
     ; You can reuse the jlo/jmid/jhi that update_day_rollover already read,
     ; but keeping your existing calls is fine.
