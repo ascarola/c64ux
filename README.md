@@ -230,3 +230,15 @@ Assemble using **ACME**:
 ```sh
 acme -f cbm -o c64ux.prg c64ux.asm
 ```
+
+---
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=ascarola%2Fc64ux&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ascarola/c64ux&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ascarola/c64ux&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ascarola/c64ux&type=date&legend=top-left" />
+ </picture>
+</a>
