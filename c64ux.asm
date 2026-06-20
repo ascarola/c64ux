@@ -1,9 +1,9 @@
 ; ============================================================
 ;  C64UX — Unix-inspired shell for the Commodore 64
 ;
-;  Version:    v0.7
+;  Version:    v0.8
 ;  Author:     A. Scarola
-;  Date:       2026-02-02
+;  Date:       2026-06-20
 ;
 ;  Description:
 ;    A small UNIX-like command shell and RAM-resident filesystem
@@ -84,6 +84,7 @@ DIR_OFF_LEN    = 10     ; 2 bytes (lo/hi)
 
 DIR_OFF_DATE   = 12     ; 10 bytes "YYYY-MM-DD"
 DIR_DATE_LEN   = 10
+DATE_OFF_DAY   = 8      ; byte offset of DD within "YYYY-MM-DD"
 
 DIR_OFF_TIME   = 22     ; 8 bytes  "HH:MM:SS"
 DIR_TIME_LEN   = 8
@@ -104,7 +105,7 @@ DPTR_LO = $FD
 DPTR_HI = $FE
 
 ; ------------------------------------------------------------
-; 8) REU
+; 7) REU
 ; ------------------------------------------------------------
 REU_STATUS  = $DF00
 REU_COMMAND = $DF01
@@ -126,11 +127,11 @@ REU_ADDRCTL = $DF0A
 ; 8) Misc.
 ; ------------------------------------------------------------
 
-C64UX_VERSION = "V0.7"
-C64UX_BUILD_DATE = "08 FEB 2026"
+C64UX_VERSION = "V0.8"
+C64UX_BUILD_DATE = "20 JUN 2026"
 
 ; ------------------------------------------------------------
-; 8) Main entry / init
+; 9) Main entry / init
 ; ------------------------------------------------------------
 start:
     sei
@@ -147,6 +148,7 @@ main_loop:
     jsr prompt
     jsr read_line
 ;    jsr dump_linebuf     ; <<< DEBUG: show raw bytes
+    jsr normalize_cmd
     jsr exec_cmd
     jmp main_loop
 
@@ -161,15 +163,24 @@ main_loop:
 boot_delay:
     jsr RDTIM            ; A=lo, X=mid, Y=hi
     clc
-    adc #18              ; target = now + 18 jiffies
-    sta boot_delay_tgt
+    adc #18
+    sta boot_delay_tgt_lo
+    bcc @no_carry
+    inx
+@no_carry:
+    stx boot_delay_tgt_hi
 @wait:
-    jsr RDTIM
-    cmp boot_delay_tgt
+    jsr RDTIM            ; A=lo, X=mid
+    cpx boot_delay_tgt_hi
     bcc @wait
+    bne @done
+    cmp boot_delay_tgt_lo
+    bcc @wait
+@done:
     rts
 
-boot_delay_tgt: !byte 0
+boot_delay_tgt_lo: !byte 0
+boot_delay_tgt_hi: !byte 0
 
 ; ------------------------------------------------------------
 ; boot_print_line — print "[  OK  ] " prefix + message + CR
@@ -268,9 +279,8 @@ boot_sequence:
     sta ZPTR_HI
     jsr boot_print_line
 
-    ; Final pause, then apply theme and clear screen for banner
+    ; Final pause, then clear screen for banner
     jsr boot_delay
-    jsr apply_theme
     jsr cls
     rts
 
@@ -544,6 +554,42 @@ normalize_buf:
 @done:
     rts
 
+; normalize_cmd: uppercase only the first token (up to first space or null)
+; leaves arguments (ECHO text, WRITE content, filenames) untouched
+normalize_cmd:
+    ldx #0
+
+@lp:
+    lda LINEBUF,x
+    beq @done
+    cmp #$20
+    beq @done
+
+    cmp #$61
+    bcc @chk_c1
+    cmp #$7B
+    bcs @chk_c1
+    sec
+    sbc #$20
+    sta LINEBUF,x
+    jmp @next
+
+@chk_c1:
+    cmp #$C1
+    bcc @next
+    cmp #$DB
+    bcs @next
+    sec
+    sbc #$80
+    sta LINEBUF,x
+
+@next:
+    inx
+    bne @lp
+
+@done:
+    rts
+
 ; ============================================================
 ; FIRST-RUN SETUP (USERNAME / DATE / TIME)
 ; ============================================================
@@ -564,7 +610,11 @@ setup:
     lda #>setup_header_txt
     sta ZPTR_HI
     jsr print_z
+    ; Only prompt for date if not loaded from CONFIG (old format fallback)
+    lda DATE_STR
+    bne @skip_date
     jsr setup_date
+@skip_date:
     jsr setup_time
     jsr init_clock
     jsr login_prompt         ; authenticate user
@@ -848,12 +898,16 @@ load_config:
 
     jsr OPEN
     jsr READST
-    bne @fail
+    beq @open_ok
+    jmp @fail
+@open_ok:
 
     ldx #2
     jsr CHKIN
     jsr READST
-    bne @fail_close
+    beq @chkin_ok
+    jmp @fail_close
+@chkin_ok:
 
     ; Read USERNAME until CR ($0D)
     ldx #0
@@ -890,6 +944,39 @@ load_config:
 @pass_done:
     lda #0
     sta PASSWORD,x
+
+    ; Try to read optional theme and date fields (new CONFIG format)
+    ; If EOI is set the old format has no more fields — skip gracefully
+    jsr READST
+    and #$40
+    bne @skip_opt
+
+    ; Theme digit: '0'=NORMAL, '1'=DARK, '2'=GREEN
+    jsr CHRIN
+    cmp #'0'
+    bcc @skip_opt
+    cmp #'3'
+    bcs @skip_opt
+    sec
+    sbc #'0'
+    sta theme_mode
+    jsr CHRIN           ; consume CR after theme digit
+
+    ; DATE_STR: read "YYYY-MM-DD" until CR
+    ldx #0
+@rd:
+    jsr CHRIN
+    cmp #$0D
+    beq @date_done
+    cpx #DATE_MAX-1
+    bcs @rd
+    sta DATE_STR,x
+    inx
+    jmp @rd
+@date_done:
+    lda #0
+    sta DATE_STR,x
+@skip_opt:
 
     ; Close and clean up
     jsr CLRCHN
@@ -984,6 +1071,27 @@ save_config:
     cpx #USER_MAX
     bne @wp
 @wp_done:
+    lda #$0D
+    jsr CHROUT
+
+    ; Write theme mode (single ASCII digit: '0', '1', or '2') then CR
+    lda theme_mode
+    clc
+    adc #'0'
+    jsr CHROUT
+    lda #$0D
+    jsr CHROUT
+
+    ; Write DATE_STR ("YYYY-MM-DD", 10 bytes) then CR
+    ldx #0
+@wd:
+    lda DATE_STR,x
+    beq @wd_done
+    jsr CHROUT
+    inx
+    cpx #DATE_MAX-1
+    bcc @wd
+@wd_done:
     lda #$0D
     jsr CHROUT
 
@@ -1633,9 +1741,9 @@ inc_date_str:
     jsr store_2d_at_date
 
 @store_day_ok:
-    ; store day (DD) at offset 8
+    ; store day (DD) at offset 8 within "YYYY-MM-DD"
     lda d_day
-    ldy #DIR_OFF_START
+    ldy #DATE_OFF_DAY
     jsr store_2d_at_date
     rts
 
@@ -1937,7 +2045,7 @@ exec_cmd:
     jsr cmd_pwd
     rts
 
-@try_nano
+@try_nano:
     jsr is_nano
     bcc @try_clear
     jsr cmd_nano
@@ -3357,6 +3465,7 @@ cmd_theme:
     jsr theme_print_name
     lda #13
     jsr CHROUT
+    jsr save_config
     rts
 
 ; ------------------------------------------------------------
@@ -3735,6 +3844,26 @@ cmd_wipereu:
     bcs wipereu_have_reu
     jmp wipereu_no_reu
 wipereu_have_reu:
+    lda #13
+    jsr CHROUT
+    lda #<wipereu_confirm_txt
+    sta ZPTR_LO
+    lda #>wipereu_confirm_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+    lda LINEBUF
+    cmp #'Y'
+    beq @wipe_confirmed
+    lda #<reset_abort_txt
+    sta ZPTR_LO
+    lda #>reset_abort_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+@wipe_confirmed:
 
     ; Clear metadata (4 bytes at $00000)
     lda #0
@@ -4063,6 +4192,7 @@ rm_fill:
     ; also check for wildcard '*'
     ldy #0
     sty rm_wildcard_len     ; will store prefix length if wildcard found
+    sty rm_is_wildcard      ; cleared here, set to 1 if '*' seen
 rm_copy:
     lda LINEBUF,x
     beq rm_check_wildcard
@@ -4080,6 +4210,8 @@ rm_copy:
 rm_found_wildcard:
     ; Y holds the prefix length
     sty rm_wildcard_len
+    lda #1
+    sta rm_is_wildcard
     ; pad rest of NAMEBUF with spaces
     cpy #DIR_NAME_LEN
     beq rm_check_wildcard
@@ -4103,7 +4235,7 @@ rm_skip_long:
     bne rm_skip_long
 
 rm_check_wildcard:
-    lda rm_wildcard_len
+    lda rm_is_wildcard
     beq rm_search           ; no wildcard, do normal search
     jmp rm_wildcard_delete  ; wildcard mode
 
@@ -4266,6 +4398,26 @@ rm_no_more:
 
 ; Wildcard delete - delete all files matching prefix in NAMEBUF
 rm_wildcard_delete:
+    lda #13
+    jsr CHROUT
+    lda #<rm_wild_confirm_txt
+    sta ZPTR_LO
+    lda #>rm_wild_confirm_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line
+    lda LINEBUF
+    cmp #'Y'
+    beq @rm_confirmed
+    lda #<reset_abort_txt
+    sta ZPTR_LO
+    lda #>reset_abort_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+@rm_confirmed:
     lda #0
     sta rm_deleted_count
 
@@ -4460,6 +4612,7 @@ rm_tmp:           !byte 0
 rm_move_lo:       !byte 0
 rm_move_hi:       !byte 0
 rm_wildcard_len:  !byte 0
+rm_is_wildcard:   !byte 0
 rm_deleted_count: !byte 0
 
 ; ============================================================
@@ -4778,9 +4931,12 @@ cmd_ls:
     lda DIR_COUNT
     bne ls_has_files
 
-    ; no files --> print "0"
-    lda #'0'
-    jsr CHROUT
+    ; no files
+    lda #<ls_no_files_txt
+    sta ZPTR_LO
+    lda #>ls_no_files_txt
+    sta ZPTR_HI
+    jsr print_z
     lda #13
     jsr CHROUT
     rts
@@ -5016,6 +5172,8 @@ cw_check_wildcard:
     bne cw_check_wildcard
 
 cw_check_exists:
+    lda #0
+    sta cw_overwrite
     ; Now check if this filename already exists
     lda DIR_COUNT
     beq cw_no_duplicate  ; no files, can't be duplicate
@@ -5038,8 +5196,11 @@ cw_search_cmp:
     cpy #DIR_NAME_LEN
     bne cw_search_cmp
 
-    ; MATCH! File already exists - reject
-    jmp cw_exists
+    ; MATCH! File exists — overwrite: reuse this entry, write at heap top
+    lda #1
+    sta cw_overwrite
+    ldx cw_tmp_x
+    jmp cw_after_name
 
 cw_search_next:
     ; Advance to next entry
@@ -5121,7 +5282,9 @@ cw_after_name:
 ; skip spaces before text
 cw_skip2:
     lda LINEBUF,x
-    beq cw_set_empty
+    bne @cw_not_empty
+    jmp cw_set_empty
+@cw_not_empty:
     cmp #$20
     bne cw_text_start
     inx
@@ -5159,6 +5322,11 @@ cw_copy:
     bne cw_ptr_ok
     inc PTR_HI
 cw_ptr_ok:
+    lda PTR_HI
+    cmp #$A0
+    bcc cw_heap_ok
+    jmp cw_heap_full
+cw_heap_ok:
 
     ; len++
     inc tmp_len_lo
@@ -5186,9 +5354,12 @@ cw_done_copy:
     lda PTR_HI
     sta fs_heap_hi
 
-    ; DIR_COUNT++
+    ; DIR_COUNT++ only for new files, not overwrites
+    lda cw_overwrite
+    bne cw_ok_print
     inc DIR_COUNT
 
+cw_ok_print:
     ; print OK
     ldx #0
 
@@ -5227,9 +5398,22 @@ cw_set_empty:
     ; stamp date/time into entry
     jsr fs_stamp_entry_datetime
 
+    lda cw_overwrite
+    bne @cw_set_skip_count
     inc DIR_COUNT
+@cw_set_skip_count:
     ldx #0
     jmp cw_ok_loop
+
+cw_heap_full:
+    lda #<cw_heap_full_txt
+    sta ZPTR_LO
+    lda #>cw_heap_full_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    jmp cw_done
 
 cw_full:
     ldx #0
@@ -5407,9 +5591,14 @@ cmd_uptime:
     sbc BOOT_SEC_HI
     sta work_hi
 
+    ; Copy UP_DAYS to scratch so the display adjustment never corrupts the counter
+    lda UP_DAYS_LO
+    sta nano_tmp_lo
+    lda UP_DAYS_HI
+    sta nano_tmp_hi
+
     ; If borrow happened, then we crossed midnight relative to boot baseline.
-    ; In that case: delta += 86400 and days-- (because UP_DAYS counted midnight rollovers,
-    ; but boot baseline is not midnight).
+    ; In that case: delta += 86400 and display days-- (scratch copy only).
     bcs @delta_ok
 
     ; delta += 86400 (0x15180) => add $80 to lo, $51 to hi, plus carry
@@ -5421,21 +5610,21 @@ cmd_uptime:
     adc #$51
     sta work_hi
 
-    ; days--
-    lda UP_DAYS_LO
+    ; display days-- (scratch copy only — UP_DAYS is not modified)
+    lda nano_tmp_lo
     bne @dec_lo
-    dec UP_DAYS_HI
+    dec nano_tmp_hi
 @dec_lo:
-    dec UP_DAYS_LO
+    dec nano_tmp_lo
 
 @delta_ok:
     ; If days != 0, print "<days> DAYS "
-    lda UP_DAYS_LO
-    ora UP_DAYS_HI
+    lda nano_tmp_lo
+    ora nano_tmp_hi
     beq @print_hms
 
-    lda UP_DAYS_HI
-    ldx UP_DAYS_LO
+    lda nano_tmp_hi
+    ldx nano_tmp_lo
     jsr print_u16_dec
 
     lda #' '
@@ -5528,6 +5717,7 @@ cmd_exit:
     ; Return to BASIC READY prompt (warm start)
     lda #13
     jsr CHROUT
+    jsr save_config   ; persist current theme and date
     jmp $A474         ; BASIC warm start
 
 ; ------------------------------------------------------------
@@ -5585,7 +5775,6 @@ cmd_dos:
 
 @do_dir:
     jsr cmd_dir
-    jsr CLRCHN
     rts
 
 @normal_dos:
@@ -6019,10 +6208,10 @@ cn_found_entry:
     lda #13
     jsr CHROUT
 
-    ; For editing, we'll rewrite at the same location
-    lda nano_old_start_lo
+    ; Write new content at heap top so adjacent files are never overwritten
+    lda fs_heap_lo
     sta PTR_LO
-    lda nano_old_start_hi
+    lda fs_heap_hi
     sta PTR_HI
 
     ; Reset length counter for new content
@@ -6103,6 +6292,11 @@ cn_copy_ch:
     inc PTR_HI
 
 cn_ptr_ok:
+    lda PTR_HI
+    cmp #$A0
+    bcc cn_heap_ok
+    jmp cn_heap_full
+cn_heap_ok:
     ; len++
     inc tmp_len_lo
     bne cn_len_ok
@@ -6122,6 +6316,11 @@ cn_end_line:
     inc PTR_HI
 
 cn_ptr_ok2:
+    lda PTR_HI
+    cmp #$A0
+    bcc cn_heap_ok2
+    jmp cn_heap_full
+cn_heap_ok2:
     inc tmp_len_lo
     bne cn_len_ok2
     inc tmp_len_hi
@@ -6130,6 +6329,18 @@ cn_len_ok2:
     jmp cn_line_loop
 
 cn_finish:
+    ; For existing files, point directory entry at the new heap location
+    ; (new content was written at fs_heap, not the old start address)
+    lda nano_existing
+    beq @skip_start_update
+    ldy #DIR_OFF_START
+    lda fs_heap_lo
+    sta (DPTR_LO),y
+    iny
+    lda fs_heap_hi
+    sta (DPTR_LO),y
+@skip_start_update:
+
     ; store len into entry offsets 10/11
     ldy #DIR_OFF_LEN
     lda tmp_len_lo
@@ -6140,41 +6351,12 @@ cn_finish:
 
     jsr fs_stamp_entry_datetime
 
-    ; Update heap pointer
-    ; For new files: always update heap to PTR
-    ; For existing files: only update if PTR > old_end
-    lda nano_existing
-    beq cn_update_heap      ; new file, always update
-
-    ; Existing file: calculate old_end = old_start + old_len
-    clc
-    lda nano_old_start_lo
-    adc nano_old_len_lo
-    sta nano_tmp_lo
-    lda nano_old_start_hi
-    adc nano_old_len_hi
-    sta nano_tmp_hi
-
-    ; Compare PTR with old_end
-    ; If PTR > old_end, update heap to PTR
-    ; If PTR <= old_end, keep heap as is (we wrote within old space)
-    lda PTR_HI
-    cmp nano_tmp_hi
-    bcc cn_skip_heap_update   ; PTR_HI < old_end_hi
-    bne cn_update_heap        ; PTR_HI > old_end_hi
-    lda PTR_LO
-    cmp nano_tmp_lo
-    bcc cn_skip_heap_update   ; PTR_LO < old_end_lo
-    beq cn_skip_heap_update   ; PTR_LO == old_end_lo
-
-cn_update_heap:
-    ; commit heap pointer = PTR
+    ; Always advance heap pointer to end of newly written content
     lda PTR_LO
     sta fs_heap_lo
     lda PTR_HI
     sta fs_heap_hi
 
-cn_skip_heap_update:
     ; Only increment DIR_COUNT if this was a new file
     lda nano_existing
     bne cn_skip_count_inc
@@ -6204,6 +6386,16 @@ cn_full:
     lda #<full_txt
     sta ZPTR_LO
     lda #>full_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+cn_heap_full:
+    lda #<cn_heap_full_txt
+    sta ZPTR_LO
+    lda #>cn_heap_full_txt
     sta ZPTR_HI
     jsr print_z
     lda #13
@@ -7452,8 +7644,40 @@ cp_check_dir:
     jmp cp_dir_full
 
 cp_dir_ok:
-    ; Check if dest already exists (optional - we'll allow overwrite by creating new)
-    ; For simplicity, we'll just create a new entry
+    ; Check if dest already exists
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+    ldx DIR_COUNT
+cp_dest_search:
+    ldy #0
+cp_dest_cmp:
+    lda (DPTR_LO),y
+    cmp NAMEBUF,y
+    bne cp_dest_next
+    iny
+    cpy #DIR_NAME_LEN
+    bne cp_dest_cmp
+    ; match — dest exists
+    lda #<file_exists_txt
+    sta ZPTR_LO
+    lda #>file_exists_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+cp_dest_next:
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc cp_dest_nc
+    inc DPTR_HI
+cp_dest_nc:
+    dex
+    bne cp_dest_search
 
     ; Check heap space available
     ; Calculate required space = cp_src_len
@@ -7793,55 +8017,12 @@ mv_check_wildcard:
     cpy #DIR_NAME_LEN
     bne mv_check_wildcard
 
-    ; Check if dest file already exists
-    lda DIR_COUNT
-    beq mv_search_src    ; no files, can't exist
-
-    ; Search for dest in directory
-    lda #<DIR_TABLE
-    sta DPTR_LO
-    lda #>DIR_TABLE
-    sta DPTR_HI
-
-    ldx DIR_COUNT
-
-mv_dest_check_loop:
-    ; Compare 8 bytes of dest name
-    ldy #0
-mv_dest_cmp:
-    lda (DPTR_LO),y
-    cmp NAMEBUF,y
-    beq @match
-    jmp mv_dest_check_next
-@match:
-    iny
-    cpy #DIR_NAME_LEN
-    bne mv_dest_cmp
-
-    ; Dest exists! Error.
-    jmp mv_dest_exists
-
-mv_dest_check_next:
-    ; Advance DPTR += DIR_ENTRY_SIZE
-    clc
-    lda DPTR_LO
-    adc #DIR_ENTRY_SIZE
-    sta DPTR_LO
-    bcc mv_dest_nc
-    inc DPTR_HI
-mv_dest_nc:
-    dex
-    beq mv_search_src
-    jmp mv_dest_check_loop
-
-mv_search_src:
-    ; Search for source file in RAM filesystem
+    ; Search for source file first — correct error if src missing
     lda DIR_COUNT
     bne mv_has_files
     jmp mv_src_notfound
 
 mv_has_files:
-    ; DPTR = DIR_TABLE
     lda #<DIR_TABLE
     sta DPTR_LO
     lda #>DIR_TABLE
@@ -7850,7 +8031,6 @@ mv_has_files:
     ldx DIR_COUNT
 
 mv_src_entry:
-    ; Compare 8 bytes of source name
     ldy #0
 mv_src_cmp:
     lda (DPTR_LO),y
@@ -7862,7 +8042,47 @@ mv_src_cmp:
     cpy #DIR_NAME_LEN
     bne mv_src_cmp
 
-    ; FOUND! Now update the name in place
+    ; Source found — save its directory pointer, then check dest
+    lda DPTR_LO
+    sta mv_src_dptr_lo
+    lda DPTR_HI
+    sta mv_src_dptr_hi
+
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+    ldx DIR_COUNT
+
+mv_dest_check_loop:
+    ldy #0
+mv_dest_cmp:
+    lda (DPTR_LO),y
+    cmp NAMEBUF,y
+    beq @dmatch
+    jmp mv_dest_next
+@dmatch:
+    iny
+    cpy #DIR_NAME_LEN
+    bne mv_dest_cmp
+    jmp mv_dest_exists
+mv_dest_next:
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc mv_dest_nc
+    inc DPTR_HI
+mv_dest_nc:
+    dex
+    bne mv_dest_check_loop
+
+mv_do_rename:
+    ; Restore pointer to source entry and overwrite name
+    lda mv_src_dptr_lo
+    sta DPTR_LO
+    lda mv_src_dptr_hi
+    sta DPTR_HI
     ldy #0
 mv_rename:
     lda NAMEBUF,y
@@ -8055,7 +8275,9 @@ cmd_passwd:
     jmp @again
 
 ; Variables for MV command
-mv_srcname: !fill DIR_NAME_LEN, ' '
+mv_srcname:     !fill DIR_NAME_LEN, ' '
+mv_src_dptr_lo: !byte 0
+mv_src_dptr_hi: !byte 0
 
 ; Variables for SAVE/LOAD commands
 save_tmp_x:     !byte 0
@@ -8114,14 +8336,29 @@ fs_init:
     lda #0
     sta DIR_COUNT
 
-    ; Clear DIR_TABLE (DIR_MAX * DIR_ENTRY_SIZE bytes)
-    ldx #0
-@clr:
+    ; Clear DIR_TABLE using 16-bit pointer so DIR_MAX can exceed 8
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+    ldx #DIR_MAX
+@clr_entry:
+    ldy #0
+@clr_byte:
     lda #0
-    sta DIR_TABLE,x
-    inx
-    cpx #(DIR_MAX*DIR_ENTRY_SIZE)   ; 240 bytes when DIR_ENTRY_SIZE=30
-    bne @clr
+    sta (DPTR_LO),y
+    iny
+    cpy #DIR_ENTRY_SIZE
+    bne @clr_byte
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc @clr_nc
+    inc DPTR_HI
+@clr_nc:
+    dex
+    bne @clr_entry
 
     rts
 
@@ -8505,6 +8742,7 @@ DIR_TABLE:   !fill (DIR_MAX*DIR_ENTRY_SIZE), 0    ; 240 bytes when DIR_ENTRY_SIZ
 tmp_len_lo:  !byte 0
 tmp_len_hi:  !byte 0
 cw_tmp_x:    !byte 0   ; temporary X storage for WRITE command
+cw_overwrite: !byte 0  ; 1 if overwriting existing file, 0 if new
 
 ; --- heap pointer (next free byte in FS heap area) ---
 fs_heap_lo: !byte <FS_HEAP_BASE
@@ -8727,6 +8965,9 @@ nano_prompt_txt:
 nano_done_txt:
 !text "SAVED.",0
 
+cn_heap_full_txt:
+!text "OUT OF RAM HEAP SPACE.",0
+
 ; --- Errors / usage ---
 notfound_txt:
 !text "FILE NOT FOUND",0
@@ -8761,6 +9002,9 @@ full_txt:
 
 file_exists_txt:
 !text "FILE ALREADY EXISTS",0
+
+ls_no_files_txt:
+!text "NO FILES",0
 
 invalid_filename_txt:
 !text "INVALID FILENAME (* NOT ALLOWED)",0
@@ -8829,6 +9073,9 @@ save_ok_txt:
 
 save_write_err_txt:
 !text "DISK WRITE ERROR. ",0
+
+cw_heap_full_txt:
+!text "OUT OF RAM HEAP SPACE.",0
 
 load_usage_txt:
 !text "USAGE: LOAD <FILENAME>",0
@@ -8924,6 +9171,13 @@ reset_ok_txt:
 
 reset_abort_txt:
 !text "ABORTED.",0
+
+rm_wild_confirm_txt:
+!text "DELETE MATCHING FILES? (Y/N): ",0
+
+wipereu_confirm_txt:
+!text "WARNING: REU FILESYSTEM IMAGE WILL BE ERASED.",13
+!text "TYPE Y TO CONFIRM: ",0
 
 config_fname_r:
 !text "CONFIG,S,R",0

@@ -3,9 +3,9 @@ Unix-inspired shell with RAM filesystem, built-in editor, disk bridging, REU per
 login support, and theming — for the Commodore 64 (6502 assembly)
 
 **C64UX** is a Unix-inspired shell written entirely in **6502 assembly** for the **Commodore 64**.  
-It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, disk bridging, optional RAM Expansion Unit (REU) support, and now **user authentication and theming** to create a minimalist yet surprisingly capable retro system environment.
+It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, disk bridging, optional RAM Expansion Unit (REU) support, and **user authentication, theming, and persistent configuration** to create a minimalist yet surprisingly capable retro system environment.
 
-**Current version:** v0.7.3  
+**Current version:** v0.8  
 **Author:** Anthony Scarola  
 **Development:** Designed and directed by Anthony Scarola; code developed with assistance from Claude Code (Anthropic)
 
@@ -26,6 +26,11 @@ This project is both a learning exercise and a functional retro shell that bridg
 - File metadata (name, size, address, date, time)
 - User login with username and password (v0.7)
 - Persistent credentials stored on disk with password obfuscation (v0.7)
+- **Persistent theme and session date across restarts** (v0.8)
+- **WRITE overwrites existing files** rather than rejecting them (v0.8)
+- **Heap boundary protection** in NANO and WRITE (v0.8)
+- **Confirmation prompts** for `RM *` and `WIPEREU` (v0.8)
+- **Lowercase command input** supported via PETSCII normalization (v0.8)
 - Auto-advancing clock based on the KERNAL jiffy timer
 - Accurate uptime tracking across midnight rollovers
 - Unix-like prompt with username
