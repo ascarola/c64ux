@@ -51,7 +51,11 @@ CHROUT = $FFD2
 RDTIM  = $FFDE     ; Read jiffy clock -> A=lo, X=mid, Y=hi
 SETTIM = $FFDB     ; Set jiffy clock  <- A=lo, X=mid, Y=hi
 
-TICKS_PER_SEC = 60 ; NTSC=60, PAL=50
+TICKS_PER_SEC = 60 ; KERNAL jiffy rate: ~60 Hz on BOTH NTSC and PAL.
+                   ; The KERNAL programs CIA1 Timer A per-standard ($4295 NTSC,
+                   ; $4025 PAL) so jiffies stay at ~60 Hz regardless of the
+                   ; video frame rate. UDTIM also wraps at 5,184,000 jiffies
+                   ; (24h @ 60 Hz). Do NOT change this to 50 for PAL.
 
 ; added these for the DOS command
 SETNAM = $FFBD
@@ -157,7 +161,7 @@ main_loop:
 ; ============================================================
 
 ; ------------------------------------------------------------
-; boot_delay — busy-wait ~0.3s (18 jiffies @ 60 Hz NTSC)
+; boot_delay — busy-wait ~0.3s (18 jiffies @ 60 Hz, NTSC and PAL)
 ; Uses KERNAL RDTIM; clobbers A, X, Y
 ; ------------------------------------------------------------
 boot_delay:
@@ -1212,7 +1216,7 @@ setup_time:
 ; ------------------------------------------------------------
 ; set_clock_from_time_str
 ; Reads TIME_STR "HH:MM:SS", converts to jiffies, calls SETTIM.
-; Uses TICKS_PER_SEC (60 NTSC, 50 PAL).
+; Uses TICKS_PER_SEC (60 on both NTSC and PAL; see definition).
 ; ------------------------------------------------------------
 set_clock_from_time_str:
     ; hours = (TIME_STR[0..1])
@@ -1302,7 +1306,9 @@ set_clock_from_time_str:
 ;   RDTIM  ($FFDE)  -> A=low, X=mid, Y=high
 ;   SETTIM ($FFDB)  <- A=low, X=mid, Y=high
 ;
-; NOTE: Set TICKS_PER_SEC to 60 (NTSC) or 50 (PAL).
+; NOTE: The KERNAL jiffy clock runs at ~60 Hz on both NTSC and PAL
+;       (CIA1 Timer A is set per-standard at reset), so TICKS_PER_SEC
+;       is fixed at 60. See its definition near the top of this file.
 ; ============================================================
 
 ; ---------------------------
