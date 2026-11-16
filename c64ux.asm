@@ -47,6 +47,7 @@ next:
 ; ------------------------------------------------------------
 CHRIN  = $FFCF
 CHROUT = $FFD2
+GETIN  = $FFE4
 
 RDTIM  = $FFDE     ; Read jiffy clock -> A=lo, X=mid, Y=hi
 SETTIM = $FFDB     ; Set jiffy clock  <- A=lo, X=mid, Y=hi
@@ -96,6 +97,7 @@ DIR_TIME_LEN   = 8
 DIR_ENTRY_SIZE = 30     ; total bytes per entry
 
 FS_HEAP_BASE   = $6000  ; heap base for file contents (VICE-safe-ish)
+FS_HEAP_END    = $A000  ; first byte past the heap (BASIC ROM starts here)
 
 ; ------------------------------------------------------------
 ; 6) Zero-page pointer aliases (do not allocate; just aliases)
@@ -141,6 +143,7 @@ start:
     sei
     lda #0
     sta theme_mode       ; reset to NORMAL on every RUN
+    sta boot_skip        ; boot animation plays again on re-RUN
     jsr cls
     jsr boot_sequence
     jsr banner
@@ -165,6 +168,11 @@ main_loop:
 ; Uses KERNAL RDTIM; clobbers A, X, Y
 ; ------------------------------------------------------------
 boot_delay:
+    ; Any key pressed during boot skips the remaining delays.
+    ; A SPACE used to skip is swallowed; other keys stay in the
+    ; buffer as type-ahead for the first prompt.
+    lda boot_skip
+    bne @done
     jsr RDTIM            ; A=lo, X=mid, Y=hi
     clc
     adc #18
@@ -174,6 +182,8 @@ boot_delay:
 @no_carry:
     stx boot_delay_tgt_hi
 @wait:
+    lda $C6              ; NDX: keys waiting in keyboard buffer
+    bne @key
     jsr RDTIM            ; A=lo, X=mid
     cpx boot_delay_tgt_hi
     bcc @wait
@@ -182,7 +192,14 @@ boot_delay:
     bcc @wait
 @done:
     rts
+@key:
+    sta boot_skip        ; nonzero: skip all remaining delays
+    lda $0277            ; first key in buffer
+    cmp #' '
+    bne @done
+    jmp GETIN            ; consume the SPACE
 
+boot_skip:         !byte 0
 boot_delay_tgt_lo: !byte 0
 boot_delay_tgt_hi: !byte 0
 
@@ -276,7 +293,24 @@ boot_sequence:
     sta ZPTR_HI
     jsr boot_print_line
 
-    ; Line 8: MOUNTING /DEV/DISK (DEVICE 8)
+    ; Line 8: MOUNTING /DEV/DISK (DEVICE n) — n = default_drive
+    lda default_drive
+    ldx #0
+    cmp #10
+    bcc @one_digit
+    sbc #10              ; C=1 from cmp
+    pha
+    lda #'1'
+    sta boot_mnt_num
+    inx
+    pla
+@one_digit:
+    ora #'0'
+    sta boot_mnt_num,x
+    lda #')'
+    sta boot_mnt_num+1,x
+    lda #0
+    sta boot_mnt_num+2,x
     lda #<boot_mnt_txt
     sta ZPTR_LO
     lda #>boot_mnt_txt
@@ -482,17 +516,15 @@ theme_fg:     !byte  1,15, 5
 ; Read a line (blocking)
 ; supports Backspace and Enter
 ; -------------------------
+; (CHRIN from the keyboard uses the KERNAL screen editor: editing
+;  keys like DEL are handled on screen before any character is
+;  returned, so only the finished line arrives here.)
 read_line:
     ldx #0
 @wait:
     jsr CHRIN
     cmp #13            ; RETURN ends the line
     beq @end
-
-    cmp #20            ; DEL (backspace)
-    beq @bksp
-    cmp #157           ; cursor-left
-    beq @bksp
 
     cpx #MAXLEN
     bcs @wait          ; ignore extra chars beyond MAXLEN
@@ -501,16 +533,113 @@ read_line:
     inx
     bne @wait
 
-@bksp:
+@end:
+    lda #0
+    sta LINEBUF,x
+    rts
+
+; -------------------------
+; read_line_cred
+; read_line, then truncate input to USER_MAX-1 characters so
+; usernames/passwords compare against exactly what was stored.
+; (USERNAME/PASSWORD hold at most USER_MAX-1 chars + null; without
+; this, long entries could never match and setup looped forever.)
+; -------------------------
+read_line_cred:
+    jsr read_line
+    lda #0
+    sta LINEBUF+USER_MAX-1
+    rts
+
+; -------------------------
+; read_line_masked
+; Password entry: reads keys with GETIN into LINEBUF, echoing '*'
+; instead of the character, so the password never appears on
+; screen (and can't be read back by cursoring up). Accepts at
+; most USER_MAX-1 characters; DEL erases; RETURN ends (and prints
+; CR, like read_line). Other control keys are ignored.
+; Out: LINEBUF = 0-terminated input. Clobbers: A, X, Y
+; -------------------------
+read_line_masked:
+    ldx #0
+    stx $CC              ; BLNSW=0: enable KERNAL cursor blink
+@wait:
+    stx rlm_x
+    jsr GETIN
+    ldx rlm_x
+    cmp #0
+    beq @wait
+
+    cmp #13
+    beq @end
+    cmp #20              ; DEL
+    beq @del
+
+    ; printable? $20-$7F or $A0-$FF
+    cmp #$20
+    bcc @wait
+    cmp #$80
+    bcc @printable
+    cmp #$A0
+    bcc @wait
+@printable:
+    cpx #USER_MAX-1
+    bcs @wait            ; full: ignore extra keys
+    sta LINEBUF,x
+    inx
+    lda #'*'
+    jsr rlm_out
+    jmp @wait
+
+@del:
     cpx #0
     beq @wait
     dex
+    lda #20              ; DEL also erases the '*' on screen
+    jsr rlm_out
     jmp @wait
 
 @end:
     lda #0
     sta LINEBUF,x
+    jsr cursor_hide
+    lda #13
+    jmp CHROUT
+
+; rlm_out — print A with the blinking cursor hidden around it so
+; no reversed cell is left behind. Preserves X.
+rlm_out:
+    pha
+    stx rlm_x
+    jsr cursor_hide
+    pla
+    jsr CHROUT
+    ldx rlm_x
+    lda #0
+    sta $CC              ; re-enable blink
     rts
+
+; cursor_hide — stop KERNAL cursor blink and, if the cursor is in
+; its visible (reversed) phase, restore the character under it.
+; Same steps the KERNAL screen editor uses before printing.
+cursor_hide:
+    sei
+    lda #1
+    sta $CC              ; BLNSW: blink off
+    lda $CF              ; BLNON: cursor currently shown?
+    beq @done
+    lda #0
+    sta $CF
+    ldy $D3              ; cursor column
+    lda $CE              ; GDBLN: original char under cursor
+    sta ($D1),y          ; screen line pointer
+    lda $0287            ; GDCOL: original colour
+    sta ($F3),y          ; colour line pointer
+@done:
+    cli
+    rts
+
+rlm_x: !byte 0
 
 ; ============================================================
 ; LINE INPUT NORMALIZATION
@@ -680,7 +809,7 @@ setup_username:
     jsr print_z
 
 @read:
-    jsr read_line
+    jsr read_line_cred
 
     lda LINEBUF
     bne @copy
@@ -720,7 +849,7 @@ setup_password:
     lda #>setup_pass_txt
     sta ZPTR_HI
     jsr print_z
-    jsr read_line
+    jsr read_line_masked
 
     ; Copy LINEBUF to PASSWORD
     ldx #0
@@ -743,7 +872,7 @@ setup_password:
     lda #>setup_confirm_txt
     sta ZPTR_HI
     jsr print_z
-    jsr read_line
+    jsr read_line_masked
 
     ; Compare LINEBUF against PASSWORD
     ldx #0
@@ -791,7 +920,7 @@ login_prompt:
     lda #>login_user_txt
     sta ZPTR_HI
     jsr print_z
-    jsr read_line
+    jsr read_line_cred
 
     ; Compare LINEBUF with USERNAME
     lda #0
@@ -821,7 +950,7 @@ login_prompt:
     lda #>login_pass_txt
     sta ZPTR_HI
     jsr print_z
-    jsr read_line
+    jsr read_line_masked
 
     ; Compare LINEBUF with PASSWORD
     ldx #0
@@ -1904,6 +2033,160 @@ pds_cleanup:
     lda #15
     jsr CLOSE
     rts
+
+; ------------------------------------------------------------
+; Drive command/error channel helpers (logical file 15, SA 15)
+;
+; IMPORTANT: on CBM drives, closing the command channel closes
+; EVERY file open on that drive. So an operation that has a data
+; file open must open channel 15 FIRST (cmdch_open), read status
+; with cmdch_read while the file is open, and only close 15
+; (cmdch_close) after the data file has been closed.
+;
+; drive_status_read = open + read + close, for use only when no
+; other file is open on the drive.
+;
+; Status result (cmdch_read / drive_status_read):
+;   DS_BUF = status line, 0-terminated ("" if no response)
+;   C = 0 if code < 20 (00 OK, 01 FILES SCRATCHED, ...)
+;   C = 1 if error code or no response
+; ------------------------------------------------------------
+DS_MAX = 39
+
+; cmdch_open — X = device. C=1 if the channel can't be opened.
+; Clobbers: A, X, Y
+cmdch_open:
+    stx ds_dev
+    lda #0
+    ldx #0
+    ldy #0
+    jsr SETNAM
+    lda #15
+    ldx ds_dev
+    ldy #15
+    jsr SETLFS
+    jsr OPEN
+    bcs @fail
+    jsr READST
+    bne @fail_close
+    clc
+    rts
+@fail_close:
+    lda #15
+    jsr CLOSE
+@fail:
+    jsr clear_st
+    sec
+    rts
+
+; cmdch_close — close logical file 15. Preserves carry.
+cmdch_close:
+    php
+    jsr CLRCHN
+    lda #15
+    jsr CLOSE
+    jsr clear_st
+    plp
+    rts
+
+; cmdch_read — read status line from open channel 15 into DS_BUF.
+; Clobbers: A, X, Y
+cmdch_read:
+    lda #0
+    sta DS_BUF
+    ldx #15
+    jsr CHKIN
+    bcs @fail
+    jsr READST
+    bne @fail
+
+    ldy #0
+@rd:
+    jsr CHRIN
+    cmp #$0D
+    beq @end
+    cpy #DS_MAX
+    bcs @nostore
+    sta DS_BUF,y
+    iny
+@nostore:
+    sty ds_tmp_y
+    jsr READST           ; stop on EOI/timeout/no device
+    ldy ds_tmp_y
+    and #$FF             ; re-test status (LDY changed the Z flag)
+    beq @rd
+@end:
+    lda #0
+    sta DS_BUF,y
+    jsr CLRCHN
+    jsr clear_st
+
+    ; codes 00-19 are informational, 20+ are errors
+    lda DS_BUF
+    cmp #'0'
+    beq @ok
+    cmp #'1'
+    beq @ok
+    sec
+    rts
+@ok:
+    clc
+    rts
+@fail:
+    jsr CLRCHN
+    jsr clear_st
+    lda #0
+    sta DS_BUF
+    sec
+    rts
+
+; drive_status_read — X = device; open 15, read status, close 15.
+; Only when no other file is open on that drive.
+drive_status_read:
+    lda #0
+    sta DS_BUF
+    jsr cmdch_open
+    bcs @nodrive
+    jsr cmdch_read
+    jmp cmdch_close      ; carry preserved
+@nodrive:
+    rts                  ; C=1, DS_BUF=""
+
+; clear_st — reset KERNAL I/O status (ST, $90). The KERNAL ORs
+; status bits into ST and never clears them between calls, so a
+; leftover EOI ($40) from reading the status line would end the
+; next LOAD read loop immediately.
+clear_st:
+    lda #0
+    sta $90
+    rts
+
+; ------------------------------------------------------------
+; print_ds_buf — print DS_BUF + CR (or "OPEN FAILED (NO DRIVE?)"
+; if empty). Clobbers: A, Y, ZPTR
+; ------------------------------------------------------------
+print_ds_buf:
+    lda DS_BUF
+    bne @have
+    lda #<dos_openfail_txt
+    sta ZPTR_LO
+    lda #>dos_openfail_txt
+    sta ZPTR_HI
+    jmp @pr
+@have:
+    lda #<DS_BUF
+    sta ZPTR_LO
+    lda #>DS_BUF
+    sta ZPTR_HI
+@pr:
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+ds_dev:    !byte 0
+ds_tmp_y:  !byte 0
+DS_BUF:    !fill DS_MAX+1, 0
 
 ; ============================================================
 ; COMMAND DISPATCH
@@ -3858,6 +4141,8 @@ wipereu_have_reu:
     sta ZPTR_HI
     jsr print_z
     jsr read_line
+    lda #13              ; CHRIN doesn't echo RETURN; end the prompt line
+    jsr CHROUT
     lda LINEBUF
     cmp #'Y'
     beq @wipe_confirmed
@@ -4148,8 +4433,8 @@ st_us_loop:
 ;       * Prints "FILE NOT FOUND"
 ;
 ; Notes:
-;   - File data in the heap is NOT reclaimed (leak by design)
-;   - Heap compaction is intentionally deferred for simplicity
+;   - The file's heap data is reclaimed (fs_reclaim compacts the
+;     heap and fixes the start address of later files)
 ;   - NAME is compared as an 8-byte, space-padded token
 ;   - Matching is case-insensitive via normalize_buf
 ;
@@ -4273,6 +4558,10 @@ rm_cmp_ok:
     bne rm_cmp
 
     ; MATCH FOUND at DPTR
+    ; Free this file's heap data (compacts heap, fixes other entries)
+    jsr fs_mark_old
+    jsr fs_reclaim
+
     ; entries_after = X-1
     dex                     ; X = entries_after
     stx rm_after_count
@@ -4412,6 +4701,8 @@ rm_wildcard_delete:
     sta ZPTR_HI
     jsr print_z
     jsr read_line
+    lda #13              ; CHRIN doesn't echo RETURN; end the prompt line
+    jsr CHROUT
     lda LINEBUF
     cmp #'Y'
     beq @rm_confirmed
@@ -4458,6 +4749,10 @@ rm_wild_cmp:
 
 rm_wild_match:
     ; Found a match! Delete this entry
+    ; Free its heap data first (compacts heap, fixes other entries)
+    jsr fs_mark_old
+    jsr fs_reclaim
+
     ; entries_after = X-1
     dex
     stx rm_after_count
@@ -4875,38 +5170,76 @@ cc_us_loop:
 
 ; ------------------------------------------------------------
 ; cmd_mem
-; ------------------------------------------------------------
 ; MEM
 ;
-; Displays the amount of free BASIC memory currently available.
+; Shows RAM filesystem usage:
+;   HEAP USED: <n> BYTES
+;   HEAP FREE: <n> BYTES
+;   FILES:     <count> OF <DIR_MAX>
 ;
-; Operation:
-;   - Reads BASIC system pointers:
-;       - MEMSIZ  ($37/$38) – top of BASIC memory
-;       - VARTAB  ($2D/$2E) – start of BASIC variables
-;   - Calculates:
-;       FREE = MEMSIZ - VARTAB
-;   - Prints the result as a decimal value
-;
-; Output format:
-;   FREE <bytes>
-;
-; Notes:
-;   - This reflects BASIC-managed RAM, not total free system RAM
-;   - Does not account for RAM used by C64uX heap or zero-page
-;   - Useful for sanity checks and diagnostics
-;
-; Clobbers:
-;   A, X, Y, free_lo/free_hi
+; USED = fs_heap - FS_HEAP_BASE, FREE = FS_HEAP_END - fs_heap.
+; Clobbers: A, X, Y
 ; ------------------------------------------------------------
 cmd_mem:
     lda #13
     jsr CHROUT
-    jsr print_free_mem_line
-    rts
 
-free_lo: !byte 0
-free_hi: !byte 0
+    ; USED
+    lda #<mem_used_txt
+    sta ZPTR_LO
+    lda #>mem_used_txt
+    sta ZPTR_HI
+    jsr print_z
+    sec
+    lda fs_heap_lo
+    sbc #<FS_HEAP_BASE
+    tax
+    lda fs_heap_hi
+    sbc #>FS_HEAP_BASE
+    jsr print_u16_dec
+    jsr mem_print_bytes
+
+    ; FREE
+    lda #<mem_free_txt
+    sta ZPTR_LO
+    lda #>mem_free_txt
+    sta ZPTR_HI
+    jsr print_z
+    sec
+    lda #<FS_HEAP_END
+    sbc fs_heap_lo
+    tax
+    lda #>FS_HEAP_END
+    sbc fs_heap_hi
+    jsr print_u16_dec
+    jsr mem_print_bytes
+
+    ; FILES
+    lda #<mem_files_txt
+    sta ZPTR_LO
+    lda #>mem_files_txt
+    sta ZPTR_HI
+    jsr print_z
+    ldx DIR_COUNT
+    lda #0
+    jsr print_u16_dec
+    lda #<mem_of_txt
+    sta ZPTR_LO
+    lda #>mem_of_txt
+    sta ZPTR_HI
+    jsr print_z
+    ldx #DIR_MAX
+    lda #0
+    jsr print_u16_dec
+    lda #13
+    jmp CHROUT
+
+mem_print_bytes:
+    lda #<mem_bytes_txt
+    sta ZPTR_LO
+    lda #>mem_bytes_txt
+    sta ZPTR_HI
+    jmp print_z
 
 ; ------------------------------------------------------------
 ; cmd_ls
@@ -5180,6 +5513,7 @@ cw_check_wildcard:
 cw_check_exists:
     lda #0
     sta cw_overwrite
+    jsr fs_clear_old
     ; Now check if this filename already exists
     lda DIR_COUNT
     beq cw_no_duplicate  ; no files, can't be duplicate
@@ -5202,7 +5536,10 @@ cw_search_cmp:
     cpy #DIR_NAME_LEN
     bne cw_search_cmp
 
-    ; MATCH! File exists — overwrite: reuse this entry, write at heap top
+    ; MATCH! File exists — overwrite: reuse this entry, write at heap top.
+    ; Remember the old block; it is reclaimed only after the new data
+    ; is committed, so a heap-full abort leaves the old file intact.
+    jsr fs_mark_old
     lda #1
     sta cw_overwrite
     ldx cw_tmp_x
@@ -5297,13 +5634,9 @@ cw_skip2:
     bne cw_skip2
 
 cw_text_start:
-    ; store start = fs_heap into entry offsets 8/9
-    ldy #DIR_OFF_START
-    lda fs_heap_lo
-    sta (DPTR_LO),y
-    iny
-    lda fs_heap_hi
-    sta (DPTR_LO),y
+    ; (entry start is stored at cw_done_copy, after a successful
+    ;  write, so an overwrite that hits heap-full can't corrupt
+    ;  the existing file)
 
     ; PTR = fs_heap (heap write pointer)
     lda fs_heap_lo
@@ -5329,7 +5662,7 @@ cw_copy:
     inc PTR_HI
 cw_ptr_ok:
     lda PTR_HI
-    cmp #$A0
+    cmp #>FS_HEAP_END
     bcc cw_heap_ok
     jmp cw_heap_full
 cw_heap_ok:
@@ -5344,6 +5677,14 @@ cw_len_ok:
     bne cw_copy
 
 cw_done_copy:
+    ; store start = fs_heap (still the pre-write value) into entry
+    ldy #DIR_OFF_START
+    lda fs_heap_lo
+    sta (DPTR_LO),y
+    iny
+    lda fs_heap_hi
+    sta (DPTR_LO),y
+
     ; store len into entry offsets 10/11
     ldy #DIR_OFF_LEN
     lda tmp_len_lo
@@ -5359,6 +5700,9 @@ cw_done_copy:
     sta fs_heap_lo
     lda PTR_HI
     sta fs_heap_hi
+
+    ; overwrite: free the old copy (no-op for new files)
+    jsr fs_reclaim
 
     ; DIR_COUNT++ only for new files, not overwrites
     lda cw_overwrite
@@ -5403,6 +5747,9 @@ cw_set_empty:
 
     ; stamp date/time into entry
     jsr fs_stamp_entry_datetime
+
+    ; overwrite with empty content: free the old copy
+    jsr fs_reclaim
 
     lda cw_overwrite
     bne @cw_set_skip_count
@@ -6054,6 +6401,8 @@ cn_skip_long_name:
     bne cn_skip_long_name
 
 cn_search_existing:
+    jsr fs_clear_old     ; nothing to reclaim unless file exists
+
     ; Now search DIR_TABLE for NANONAME
     lda DIR_COUNT
     beq cn_create_new    ; no files, must create new
@@ -6077,6 +6426,9 @@ cn_search_cmp:
     bne cn_search_cmp
 
     ; MATCH! File exists - set flag and use this entry
+    ; Remember old block; reclaimed in cn_finish after the new
+    ; content is committed.
+    jsr fs_mark_old
     lda #1
     sta nano_existing
     jmp cn_found_entry
@@ -6299,7 +6651,7 @@ cn_copy_ch:
 
 cn_ptr_ok:
     lda PTR_HI
-    cmp #$A0
+    cmp #>FS_HEAP_END
     bcc cn_heap_ok
     jmp cn_heap_full
 cn_heap_ok:
@@ -6323,7 +6675,7 @@ cn_end_line:
 
 cn_ptr_ok2:
     lda PTR_HI
-    cmp #$A0
+    cmp #>FS_HEAP_END
     bcc cn_heap_ok2
     jmp cn_heap_full
 cn_heap_ok2:
@@ -6362,6 +6714,9 @@ cn_finish:
     sta fs_heap_lo
     lda PTR_HI
     sta fs_heap_hi
+
+    ; Existing file: free the old copy (no-op for new files)
+    jsr fs_reclaim
 
     ; Only increment DIR_COUNT if this was a new file
     lda nano_existing
@@ -6781,6 +7136,13 @@ save_have_flen:
     ldy #0               ; Y = index into DOSFNAME
 save_copy_fname:
     lda LINEBUF,x
+    cmp #'*'             ; DOS wildcards could match (and, on
+    beq @bad             ; overwrite, scratch) other disk files
+    cmp #'?'
+    bne @name_ok
+@bad:
+    jmp save_bad_name
+@name_ok:
     sta DOSFNAME,y
     inx
     iny
@@ -6802,8 +7164,20 @@ save_copy_fname:
     iny
 
     ; Y now has total length (filename + 4)
-    ; SETNAM(len=Y, ptr in X/Y for DOSFNAME)
-    tya                  ; A = total length
+    sty save_dosname_len
+    lda #0
+    sta save_retried
+
+save_do_open:
+    ; Open command channel first; it must stay open until file 2
+    ; is closed (closing 15 closes all files on the drive).
+    ldx save_drive_num
+    jsr cmdch_open
+    bcc @cmd_ok
+    jmp save_open_fail
+@cmd_ok:
+    ; SETNAM(len, DOSFNAME)
+    lda save_dosname_len
     ldx #<DOSFNAME
     ldy #>DOSFNAME
     jsr SETNAM
@@ -6820,6 +7194,12 @@ save_copy_fname:
     beq @open_ok
     jmp save_open_fail
 @open_ok:
+    ; The KERNAL OPEN succeeds even when the drive refuses the file;
+    ; the real result is on the drive's error channel.
+    jsr cmdch_read
+    bcc @status_ok
+    jmp save_open_refused
+@status_ok:
     ; Set output to logical file 2
     ldx #2
     jsr CHKOUT
@@ -6864,18 +7244,126 @@ save_write_done:
     lda #2
     jsr CLOSE
 
-    ; Print success message
+    ; Errors like 72 DISK FULL are only reported once the file is
+    ; closed, so check the drive before claiming success.
+    jsr cmdch_read
+    jsr cmdch_close      ; carry preserved
+    bcs @failed
+
+    ; Print success message + drive status
     lda #<save_ok_txt
     sta ZPTR_LO
     lda #>save_ok_txt
     sta ZPTR_HI
     jsr print_z
+    jmp print_ds_buf
+
+@failed:
+    lda #<save_write_err_txt
+    sta ZPTR_LO
+    lda #>save_write_err_txt
+    sta ZPTR_HI
+    jsr print_z
+    jmp print_ds_buf
+
+; ------------------------------------------------------------
+; save_open_refused — drive rejected the OPEN (status in DS_BUF)
+; 63 FILE EXISTS -> ask to overwrite; scratch + retry once.
+; ------------------------------------------------------------
+save_open_refused:
+    lda #2
+    jsr CLOSE
+    jsr cmdch_close
+
+    lda DS_BUF
+    cmp #'6'
+    bne @show_far
+    lda DS_BUF+1
+    cmp #'3'
+    bne @show_far
+    lda save_retried
+    beq @ask
+@show_far:
+    jmp print_ds_buf
+@ask:
+
+    ; Ask before replacing the disk file
+    lda #<save_exists_txt
+    sta ZPTR_LO
+    lda #>save_exists_txt
+    sta ZPTR_HI
+    jsr print_z
+    jsr read_line        ; LINEBUF reused; name is safe in DOSFNAME
     lda #13
     jsr CHROUT
-
-    ; Print drive status
-    jsr print_drive_status
+    lda LINEBUF
+    cmp #'Y'
+    beq @scratch
+    lda #<reset_abort_txt
+    sta ZPTR_LO
+    lda #>reset_abort_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
     rts
+
+@scratch:
+    ; DOSCMD = "S0:" + filename (save_flen_tmp bytes of DOSFNAME)
+    lda #'S'
+    sta DOSCMD
+    lda #'0'
+    sta DOSCMD+1
+    lda #':'
+    sta DOSCMD+2
+    ldy #0
+@cpy:
+    lda DOSFNAME,y
+    sta DOSCMD+3,y
+    iny
+    cpy save_flen_tmp
+    bne @cpy
+
+    ; send command: OPEN 15,dev,15,"S0:NAME" / CLOSE 15
+    tya
+    clc
+    adc #3
+    ldx #<DOSCMD
+    ldy #>DOSCMD
+    jsr SETNAM
+    lda #15
+    ldx save_drive_num
+    ldy #15
+    jsr SETLFS
+    jsr OPEN
+    lda #15
+    jsr CLOSE
+
+    ; scratch must report 01, FILES SCRATCHED
+    ldx save_drive_num
+    jsr drive_status_read
+    bcs @show
+
+    lda #1
+    sta save_retried
+    jmp save_do_open
+
+@show:
+    jmp print_ds_buf
+
+save_bad_name:
+    lda #<invalid_filename_txt
+    sta ZPTR_LO
+    lda #>invalid_filename_txt
+    sta ZPTR_HI
+    jsr print_z
+    lda #13
+    jsr CHROUT
+    rts
+
+save_dosname_len: !byte 0
+load_dosname_len: !byte 0
+save_retried:     !byte 0
 
 save_next_entry:
     ; Advance DPTR += DIR_ENTRY_SIZE
@@ -6912,6 +7400,9 @@ save_usage:
 
 save_open_fail:
     jsr CLRCHN
+    lda #2
+    jsr CLOSE
+    jsr cmdch_close
     lda #<dos_openfail_txt
     sta ZPTR_LO
     lda #>dos_openfail_txt
@@ -6919,13 +7410,13 @@ save_open_fail:
     jsr print_z
     lda #13
     jsr CHROUT
-    jsr print_drive_status
     rts
 
 save_chkout_fail:
     jsr CLRCHN
     lda #2
     jsr CLOSE
+    jsr cmdch_close
     lda #<dos_nochan_txt
     sta ZPTR_LO
     lda #>dos_nochan_txt
@@ -6939,15 +7430,14 @@ save_write_error:
     jsr CLRCHN
     lda #2
     jsr CLOSE
+    jsr cmdch_read
+    jsr cmdch_close
     lda #<save_write_err_txt
     sta ZPTR_LO
     lda #>save_write_err_txt
     sta ZPTR_HI
     jsr print_z
-    lda #13
-    jsr CHROUT
-    jsr print_drive_status
-    rts
+    jmp print_ds_buf
 
 ; ------------------------------------------------------------
 ; cmd_load
@@ -7134,8 +7624,17 @@ load_copy_fname:
     iny
 
     ; Y now has total length (filename + 4)
-    ; SETNAM(len=Y, ptr in X/Y for DOSFNAME)
-    tya                  ; A = total length
+    sty load_dosname_len
+
+    ; Open command channel first; it must stay open until file 2
+    ; is closed (closing 15 closes all files on the drive).
+    ldx load_drive_num
+    jsr cmdch_open
+    bcc @cmd_ok
+    jmp load_open_fail
+@cmd_ok:
+    ; SETNAM again (cmdch_open replaced the name)
+    lda load_dosname_len
     ldx #<DOSFNAME
     ldy #>DOSFNAME
     jsr SETNAM
@@ -7152,6 +7651,15 @@ load_copy_fname:
     beq @open_ok
     jmp load_open_fail
 @open_ok:
+    ; KERNAL OPEN succeeds even if the file doesn't exist; ask the
+    ; drive (e.g. 62, FILE NOT FOUND) before reading anything.
+    jsr cmdch_read
+    bcc @status_ok
+    lda #2
+    jsr CLOSE
+    jsr cmdch_close
+    jmp print_ds_buf
+@status_ok:
     ; Set input from logical file 2
     ldx #2
     jsr CHKIN
@@ -7208,7 +7716,7 @@ load_len_ok:
 
     ; Check heap limit (simple check: don't exceed $9FFF)
     lda PTR_HI
-    cmp #$A0
+    cmp #>FS_HEAP_END
     bcc @heap_ok
     jmp load_heap_full
 @heap_ok:
@@ -7219,6 +7727,9 @@ load_read_done:
     jsr CLRCHN
     lda #2
     jsr CLOSE
+    jsr cmdch_close
+
+    jsr fs_clear_old     ; nothing to reclaim unless file exists
 
     ; Now create or update RAM filesystem entry
     ; First check if file already exists
@@ -7244,7 +7755,9 @@ load_search_cmp:
     cpy #DIR_NAME_LEN
     bne load_search_cmp
 
-    ; MATCH! Update existing entry
+    ; MATCH! Update existing entry; old copy is reclaimed after
+    ; the new data is committed in load_update_entry.
+    jsr fs_mark_old
     jmp load_update_entry
 
 load_search_next:
@@ -7336,6 +7849,9 @@ load_update_entry:
     lda PTR_HI
     sta fs_heap_hi
 
+    ; Replaced an existing file: free the old copy
+    jsr fs_reclaim
+
     ; Print success message
     lda #<load_ok_txt
     sta ZPTR_LO
@@ -7369,21 +7885,26 @@ load_usage:
     rts
 
 load_open_fail:
+    ; KERNAL-level OPEN failure (e.g. device not present). A missing
+    ; file is caught after OPEN via the drive's error channel.
     jsr CLRCHN
-    lda #<load_notfound_txt
+    lda #2
+    jsr CLOSE
+    jsr cmdch_close
+    lda #<dos_openfail_txt
     sta ZPTR_LO
-    lda #>load_notfound_txt
+    lda #>dos_openfail_txt
     sta ZPTR_HI
     jsr print_z
     lda #13
     jsr CHROUT
-    jsr print_drive_status
     rts
 
 load_chkin_fail:
     jsr CLRCHN
     lda #2
     jsr CLOSE
+    jsr cmdch_close
     lda #<dos_nochan_txt
     sta ZPTR_LO
     lda #>dos_nochan_txt
@@ -7397,20 +7918,20 @@ load_read_error:
     jsr CLRCHN
     lda #2
     jsr CLOSE
+    jsr cmdch_read
+    jsr cmdch_close
     lda #<load_read_err_txt
     sta ZPTR_LO
     lda #>load_read_err_txt
     sta ZPTR_HI
     jsr print_z
-    lda #13
-    jsr CHROUT
-    jsr print_drive_status
-    rts
+    jmp print_ds_buf
 
 load_heap_full:
     jsr CLRCHN
     lda #2
     jsr CLOSE
+    jsr cmdch_close
     lda #<load_heap_full_txt
     sta ZPTR_LO
     lda #>load_heap_full_txt
@@ -7697,7 +8218,7 @@ cp_dest_nc:
     sta cp_new_end_hi
 
     ; Check if new_end >= $A000
-    cmp #$A0
+    cmp #>FS_HEAP_END
     bcc cp_heap_ok
     jmp cp_heap_full
 
@@ -8220,7 +8741,7 @@ cmd_passwd:
     lda #>setup_pass_txt
     sta ZPTR_HI
     jsr print_z
-    jsr read_line
+    jsr read_line_masked
 
     ; Copy LINEBUF to PASSWORD
     ldx #0
@@ -8243,7 +8764,7 @@ cmd_passwd:
     lda #>setup_confirm_txt
     sta ZPTR_HI
     jsr print_z
-    jsr read_line
+    jsr read_line_masked
 
     ; Compare LINEBUF against PASSWORD
     ldx #0
@@ -8367,6 +8888,198 @@ fs_init:
     bne @clr_entry
 
     rts
+
+; ------------------------------------------------------------
+; fs_mark_old
+; Remembers the heap block of the entry at DPTR (start/len) as
+; the block to reclaim with fs_reclaim.
+; Clobbers: A, Y
+; ------------------------------------------------------------
+fs_mark_old:
+    ldy #DIR_OFF_START
+    lda (DPTR_LO),y
+    sta fr_start_lo
+    iny
+    lda (DPTR_LO),y
+    sta fr_start_hi
+    ldy #DIR_OFF_LEN
+    lda (DPTR_LO),y
+    sta fr_len_lo
+    iny
+    lda (DPTR_LO),y
+    sta fr_len_hi
+    rts
+
+; ------------------------------------------------------------
+; fs_clear_old — nothing to reclaim (fr_len = 0)
+; ------------------------------------------------------------
+fs_clear_old:
+    lda #0
+    sta fr_len_lo
+    sta fr_len_hi
+    rts
+
+; ------------------------------------------------------------
+; fs_reclaim
+; Frees the heap block [fr_start, fr_start+fr_len):
+;   - slides every byte from fr_start+fr_len .. fs_heap-1 down
+;     by fr_len (heap compaction)
+;   - fs_heap -= fr_len
+;   - every directory entry (0..DIR_COUNT-1) whose start is
+;     >= fr_start+fr_len gets start -= fr_len
+;   - clears fr_len so a repeat call is a no-op
+; Call AFTER any new data has been committed (fs_heap updated)
+; so a failed write never destroys the old file.
+; No-op if fr_len == 0.
+; Preserves: X, PTR, DPTR, ZPTR.  Clobbers: A, Y
+; ------------------------------------------------------------
+fs_reclaim:
+    lda fr_len_lo
+    ora fr_len_hi
+    bne @go
+    rts
+@go:
+    txa
+    pha
+    lda PTR_LO
+    pha
+    lda PTR_HI
+    pha
+    lda DPTR_LO
+    pha
+    lda DPTR_HI
+    pha
+    lda ZPTR_LO
+    pha
+    lda ZPTR_HI
+    pha
+
+    ; fr_end = fr_start + fr_len  (first byte after freed block)
+    clc
+    lda fr_start_lo
+    adc fr_len_lo
+    sta fr_end_lo
+    lda fr_start_hi
+    adc fr_len_hi
+    sta fr_end_hi
+
+    ; count = fs_heap - fr_end
+    sec
+    lda fs_heap_lo
+    sbc fr_end_lo
+    sta fr_cnt_lo
+    lda fs_heap_hi
+    sbc fr_end_hi
+    sta fr_cnt_hi
+
+    ; ZPTR = src (fr_end), PTR = dst (fr_start)
+    lda fr_end_lo
+    sta ZPTR_LO
+    lda fr_end_hi
+    sta ZPTR_HI
+    lda fr_start_lo
+    sta PTR_LO
+    lda fr_start_hi
+    sta PTR_HI
+
+    ldy #0
+@copy:
+    lda fr_cnt_lo
+    ora fr_cnt_hi
+    beq @copied
+    lda (ZPTR_LO),y
+    sta (PTR_LO),y
+    inc ZPTR_LO
+    bne @src_ok
+    inc ZPTR_HI
+@src_ok:
+    inc PTR_LO
+    bne @dst_ok
+    inc PTR_HI
+@dst_ok:
+    lda fr_cnt_lo
+    bne @dec_lo
+    dec fr_cnt_hi
+@dec_lo:
+    dec fr_cnt_lo
+    jmp @copy
+@copied:
+
+    ; fs_heap -= fr_len
+    sec
+    lda fs_heap_lo
+    sbc fr_len_lo
+    sta fs_heap_lo
+    lda fs_heap_hi
+    sbc fr_len_hi
+    sta fs_heap_hi
+
+    ; Fix up start addresses of entries that lived above the block
+    lda #<DIR_TABLE
+    sta DPTR_LO
+    lda #>DIR_TABLE
+    sta DPTR_HI
+    ldx DIR_COUNT
+    beq @adj_done
+@adj:
+    ; if start < fr_end -> leave alone
+    ldy #DIR_OFF_START+1
+    lda (DPTR_LO),y
+    cmp fr_end_hi
+    bcc @adj_next
+    bne @adj_sub
+    dey
+    lda (DPTR_LO),y
+    cmp fr_end_lo
+    bcc @adj_next
+@adj_sub:
+    ldy #DIR_OFF_START
+    sec
+    lda (DPTR_LO),y
+    sbc fr_len_lo
+    sta (DPTR_LO),y
+    iny
+    lda (DPTR_LO),y
+    sbc fr_len_hi
+    sta (DPTR_LO),y
+@adj_next:
+    clc
+    lda DPTR_LO
+    adc #DIR_ENTRY_SIZE
+    sta DPTR_LO
+    bcc @adj_nc
+    inc DPTR_HI
+@adj_nc:
+    dex
+    bne @adj
+@adj_done:
+
+    jsr fs_clear_old
+
+    pla
+    sta ZPTR_HI
+    pla
+    sta ZPTR_LO
+    pla
+    sta DPTR_HI
+    pla
+    sta DPTR_LO
+    pla
+    sta PTR_HI
+    pla
+    sta PTR_LO
+    pla
+    tax
+    rts
+
+fr_start_lo: !byte 0
+fr_start_hi: !byte 0
+fr_len_lo:   !byte 0
+fr_len_hi:   !byte 0
+fr_end_lo:   !byte 0
+fr_end_hi:   !byte 0
+fr_cnt_lo:   !byte 0
+fr_cnt_hi:   !byte 0
 
 ; ------------------------------------------------------------
 ; fs_stamp_entry_datetime
@@ -8557,46 +9270,6 @@ print_place:
     rts
 
 ; ------------------------------------------------------------
-; print_free_mem_line
-; Prints: " FREE <bytes>" then CR
-; (Used by MEM)
-;
-; Notes:
-;   FREE = MEMSIZ ($37/$38) - VARTAB ($2D/$2E)
-; Clobbers: A,X,Y, free_lo/free_hi
-; ------------------------------------------------------------
-print_free_mem_line:
-    ; leading space so it looks nice after UNAME
-    lda #' '
-    jsr CHROUT
-
-    ; Print "FREE "
-    ldx #0
-@t1:
-    lda mem_free_txt,x
-    beq @calc
-    jsr CHROUT
-    inx
-    bne @t1
-
-@calc:
-    sec
-    lda $37
-    sbc $2D
-    sta free_lo
-    lda $38
-    sbc $2E
-    sta free_hi
-
-    lda free_hi
-    ldx free_lo
-    jsr print_u16_dec
-
-    lda #13
-    jsr CHROUT
-    rts
-
-; ------------------------------------------------------------
 ; print_dptr_bytes
 ; Prints X bytes from (DPTR) + Y
 ;
@@ -8759,6 +9432,7 @@ NAMEBUF: !fill DIR_NAME_LEN, ' '
 
 ; --- DOS filename buffer (for appending ,S,W or ,S,R) ---
 DOSFNAME: !fill 20, 0
+DOSCMD:   !fill 20, 0     ; "S0:" + up to 16-char name (SAVE overwrite)
 
 ; --- nano editor state ---
 nano_existing:     !byte 0   ; 0=new file, 1=editing existing
@@ -8861,7 +9535,8 @@ boot_hw_txt:      !text "DETECTING HARDWARE",0
 boot_reu_yes_txt: !text "REU: DETECTED",0
 boot_reu_no_txt:  !text "REU: NOT FOUND",0
 boot_drv_txt:     !text "LOADING DEVICE DRIVERS",0
-boot_mnt_txt:     !text "MOUNTING /DEV/DISK (DEVICE 8)",0
+boot_mnt_txt:     !text "MOUNTING /DEV/DISK (DEVICE "
+boot_mnt_num:     !text "8)",0,0  ; patched at boot from default_drive
 
 ; --- Banners / prompts ---
 banner_txt:
@@ -9022,8 +9697,16 @@ unk_txt:
 month_len:
     !byte 31,28,31,30,31,30,31,31,30,31,30,31
 
+mem_used_txt:
+!text "HEAP USED: ",0
 mem_free_txt:
-!text "MEM FREE: ",0
+!text "HEAP FREE: ",0
+mem_bytes_txt:
+!text " BYTES",13,0
+mem_files_txt:
+!text "FILES:     ",0
+mem_of_txt:
+!text " OF ",0
 
 dbg_txt:
 !text "BUF:",0
@@ -9068,7 +9751,7 @@ savereu_fail_txt:
 !text 13,"FILESYSTEM SAVE FAILED",0
 
 wipereu_ok_txt:
-!text 13,"REU WIPED",0
+!text "REU WIPED",0
 
 ; --- SAVE/LOAD command text ---
 save_usage_txt:
@@ -9079,6 +9762,9 @@ save_ok_txt:
 
 save_write_err_txt:
 !text "DISK WRITE ERROR. ",0
+
+save_exists_txt:
+!text "FILE EXISTS. OVERWRITE? (Y/N): ",0
 
 cw_heap_full_txt:
 !text "OUT OF RAM HEAP SPACE.",0
@@ -9212,3 +9898,10 @@ theme_name_green:
 
 ; --- THEME state ---
 theme_mode: !byte 0    ; 0=NORMAL, 1=DARK, 2=GREEN
+; ------------------------------------------------------------
+; Build-time guard: program + variables must end below the
+; RAM filesystem heap, or file data would overwrite code.
+; ------------------------------------------------------------
+!if * > FS_HEAP_BASE {
+    !error "C64UX code/data overlaps FS_HEAP_BASE heap area"
+}

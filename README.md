@@ -31,6 +31,10 @@ This project is both a learning exercise and a functional retro shell that bridg
 - **Heap boundary protection** in NANO and WRITE (v0.8)
 - **Confirmation prompts** for `RM *` and `WIPEREU` (v0.8)
 - **Lowercase command input** supported via PETSCII normalization (v0.8)
+- **Heap space reclaimed** when files are deleted or overwritten — no more leaks
+- **SAVE asks before overwriting** an existing disk file
+- **Masked password entry** and **MEM** now reports RAM filesystem usage
+- **Real drive status** for SAVE/LOAD (e.g. `62, FILE NOT FOUND`, `72, DISK FULL`)
 - Auto-advancing clock based on the KERNAL jiffy timer
 - Accurate uptime tracking across midnight rollovers
 - Unix-like prompt with username
@@ -59,7 +63,7 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `WRITE`   | Create a new RAM-resident text file |
 | `NANO`    | Edit or create a RAM file (multi-line editor) |
 | `ECHO`    | Print text to the screen |
-| `RM`      | Delete RAM files (supports prefix wildcards) |
+| `RM`      | Delete RAM files and reclaim their space (supports prefix wildcards) |
 | `CP`      | Copy a RAM file to a new RAM file |
 | `MV`      | Rename a RAM file |
 | `SAVE`    | Save a RAM file to disk (SEQ format) |
@@ -70,7 +74,7 @@ This project is both a learning exercise and a functional retro shell that bridg
 | `WIPEREU` | Clear the REU-stored filesystem image |
 | `PASSWD`  | Change the current user password |
 | `THEME`   | View or change the system color theme |
-| `MEM`     | Show free BASIC memory |
+| `MEM`     | Show RAM filesystem usage (heap used/free, file count) |
 | `DATE`    | Show current session date |
 | `TIME`    | Show current session time |
 | `UPTIME`  | Show system uptime (DAYS HH:MM:SS) |
@@ -91,18 +95,21 @@ C64UX now features a structured, system-style boot process followed by user auth
 
 ### Boot Sequence
 - Displays staged `[  OK  ]` initialization messages:
-  - `STARTING C64UX KERNEL V0.7`
+  - `STARTING C64UX KERNEL V0.8`
   - `MEMORY CHECK: 64K RAM SYSTEM`
   - `INITIALIZING FILESYSTEM`
   - `HEAP ALLOCATED AT $6000`
   - `DETECTING HARDWARE`
   - `REU: DETECTED` or `REU: NOT FOUND`
   - `LOADING DEVICE DRIVERS`
-  - `MOUNTING /DEV/DISK (DEVICE 8)`
+  - `MOUNTING /DEV/DISK (DEVICE n)` — the current default drive
+- Press any key to skip the boot animation (a SPACE used to skip is discarded; other keys are kept as type-ahead)
 - Screen is cleared after boot for a clean banner display
 
 ### Login System
 - On first run, the user is prompted to create a **username and password**, then enter the **session date and time**
+- Passwords are **masked with `*`** as they are typed (setup, login, and `PASSWD`)
+- Usernames and passwords are limited to **15 characters**; longer input is truncated consistently at setup, login, and `PASSWD`
 - Credentials are stored in a disk-based **SEQ configuration file** (`CONFIG`); the password is XOR-obfuscated before being written to disk to prevent casual plaintext inspection
 - On subsequent runs, credentials are automatically loaded and the user is prompted for the session date and time
 - User must authenticate before entering the shell
@@ -128,7 +135,7 @@ Themes control:
 - Background color
 - Text color
 
-Themes are reset to `NORMAL` on each program launch and applied after the banner to avoid PETSCII color conflicts.
+The selected theme is saved in the `CONFIG` file and restored at the next launch (v0.8). It is applied after the banner to avoid PETSCII color conflicts.
 
 ---
 
@@ -145,6 +152,7 @@ C64UX includes a built-in **nano-style text editor** for RAM files.
 - Editing ends when the user enters a single `.` on its own line
 - Lines are stored using CR (`$0D`) separators
 - Changes are saved back into the RAM filesystem
+- When an existing file is edited, its previous copy is freed once the new content is saved
 
 ---
 
@@ -160,14 +168,18 @@ C64UX supports direct bridging between the RAM filesystem and disk storage using
 - Uses streamed KERNAL I/O
 - Honors the currently selected default drive
 - Optional per-command device override
+- If the file already exists on disk, asks `OVERWRITE? (Y/N)`; `Y` scratches the old file and saves again
+- Reports success only after the drive confirms the write (errors such as `72, DISK FULL` are shown)
+- Wildcards (`*`, `?`) are not allowed in disk filenames
 
 ### LOAD
 `LOAD <filename>`  
 `LOAD <device>:<filename>`
 
 - Loads a SEQ file from disk into the RAM filesystem
-- Creates or updates a RAM directory entry
+- Creates or updates a RAM directory entry (the old copy's space is reclaimed)
 - Streams file data directly into the RAM heap
+- Shows the drive's status message on failure (e.g. `62, FILE NOT FOUND`)
 
 ---
 
@@ -200,13 +212,16 @@ Systems without an REU continue to function normally.
 
 - **Directory size:** fixed (`DIR_MAX` = 8 entries)
 - **Filename length:** 8 characters (space-padded)
-- **Storage:** contiguous heap in RAM starting at `$6000`
+- **Storage:** contiguous heap in RAM from `$6000` to `$9FFF` (16 KB)
+- **Space reclaim:** deleting or overwriting a file compacts the heap — later files slide down and their directory entries are updated. Overwrites write the new copy first and free the old one only after it succeeds, so running out of space never damages the existing file.
 - **Directory entry** (30 bytes each) **includes:**
   - Name (8 bytes)
   - Start address (2 bytes)
   - Length (2 bytes)
   - Creation date — 10 bytes (`YYYY-MM-DD`)
   - Creation time — 8 bytes (`HH:MM:SS`)
+
+The build fails if the program code ever grows into the heap area.
 
 RAM filesystem data is volatile by default but can be preserved using REU support or saved to disk individually via `SAVE`.
 
@@ -218,7 +233,7 @@ C64UX is designed and directed by A. Scarola. The 6502 assembly code
 was developed with the assistance of Claude Code (Anthropic AI). All
 architecture decisions, feature design, subsystem structure, version
 planning, and testing were performed by the author. The project has been
-iteratively developed across 7 releases.
+developed iteratively across multiple releases.
 
 This project is released under the MIT license. The author asserts
 copyright based on the creative and architectural contributions described
