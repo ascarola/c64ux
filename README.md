@@ -5,7 +5,7 @@ login support, and theming — for the Commodore 64 (6502 assembly)
 **C64UX** is a Unix-inspired shell written entirely in **6502 assembly** for the **Commodore 64**.  
 It combines a RAM-resident filesystem, a nano-style text editor, Commodore DOS integration, disk bridging, optional RAM Expansion Unit (REU) support, and **user authentication, theming, and persistent configuration** to create a minimalist yet surprisingly capable retro system environment.
 
-**Current version:** v0.8  
+**Current version:** v0.9  
 **Author:** Anthony Scarola  
 **Development:** Designed and directed by Anthony Scarola; code developed with assistance from Claude Code (Anthropic)
 
@@ -31,10 +31,10 @@ This project is both a learning exercise and a functional retro shell that bridg
 - **Heap boundary protection** in NANO and WRITE (v0.8)
 - **Confirmation prompts** for `RM *` and `WIPEREU` (v0.8)
 - **Lowercase command input** supported via PETSCII normalization (v0.8)
-- **Heap space reclaimed** when files are deleted or overwritten — no more leaks
-- **SAVE asks before overwriting** an existing disk file
-- **Masked password entry** and **MEM** now reports RAM filesystem usage
-- **Real drive status** for SAVE/LOAD (e.g. `62, FILE NOT FOUND`, `72, DISK FULL`)
+- **Heap space reclaimed** when files are deleted or overwritten — no more leaks (v0.9)
+- **SAVE asks before overwriting** an existing disk file (v0.9)
+- **Masked password entry** and **MEM** now reports RAM filesystem usage (v0.9)
+- **Real drive status** for SAVE/LOAD (e.g. `62, FILE NOT FOUND`, `72, DISK FULL`) (v0.9)
 - Auto-advancing clock based on the KERNAL jiffy timer
 - Accurate uptime tracking across midnight rollovers
 - Unix-like prompt with username
@@ -95,7 +95,7 @@ C64UX now features a structured, system-style boot process followed by user auth
 
 ### Boot Sequence
 - Displays staged `[  OK  ]` initialization messages:
-  - `STARTING C64UX KERNEL V0.8`
+  - `STARTING C64UX KERNEL V0.9`
   - `MEMORY CHECK: 64K RAM SYSTEM`
   - `INITIALIZING FILESYSTEM`
   - `HEAP ALLOCATED AT $6000`

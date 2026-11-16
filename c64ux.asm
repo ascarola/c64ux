@@ -1,9 +1,9 @@
 ; ============================================================
 ;  C64UX — Unix-inspired shell for the Commodore 64
 ;
-;  Version:    v0.8
+;  Version:    v0.9
 ;  Author:     A. Scarola
-;  Date:       2026-06-20
+;  Date:       2026-11-15
 ;
 ;  Description:
 ;    A small UNIX-like command shell and RAM-resident filesystem
@@ -133,8 +133,8 @@ REU_ADDRCTL = $DF0A
 ; 8) Misc.
 ; ------------------------------------------------------------
 
-C64UX_VERSION = "V0.8"
-C64UX_BUILD_DATE = "20 JUN 2026"
+C64UX_VERSION = "V0.9"
+C64UX_BUILD_DATE = "15 NOV 2026"
 
 ; ------------------------------------------------------------
 ; 9) Main entry / init
